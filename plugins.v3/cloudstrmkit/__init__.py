@@ -60,7 +60,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.5.1"
+    plugin_version = "0.5.4"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -280,6 +280,14 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "115 目录列举诊断",
                 "description": "对比宿主 U115Pan.list 与目录查询结果，定位对账扫描失败原因",
+            },
+            {
+                "path": "/diag/reconcile-source",
+                "endpoint": self.api_diag_reconcile_source,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "对账数据源诊断",
+                "description": "检查整理历史可读性与目标数量（不生成文件）",
             },
             {
                 "path": "/diag/clear-events",
@@ -601,6 +609,17 @@ class CloudStrmKit(_PluginBase):
             return {"success": False, "message": "缺少 path 参数（115 目录路径）", "data": None}
         result = probe_u115_list(path.strip())
         return {"success": bool(result.get("ok")), "message": "", "data": result}
+
+    def api_diag_reconcile_source(self) -> Dict[str, Any]:
+        """
+        对账数据源诊断（整理历史可读性）。
+
+        :return: 统一响应结构
+        """
+        if self._reconciler is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        result = self._reconciler.probe_history()
+        return {"success": bool(result.get("ok")), "message": str(result.get("error") or ""), "data": result}
 
     # ------------------------------------------------------------------
     # 播放（302）

@@ -75,8 +75,26 @@ class PlayService:
         if entry is None:
             return self._reject(404, "索引不存在", entry_id, user_agent, client_ip, started)
 
+        pickcode = entry.pickcode
+        if not pickcode:
+            # 对账批量生成时可能缺少 pickcode，播放时按路径补查并回填
+            try:
+                pickcode = self._u115.get_pickcode(entry.pan_path)
+            except U115Error as err:
+                return self._reject(
+                    502,
+                    f"查询 115 文件失败：{err}",
+                    entry_id,
+                    user_agent,
+                    client_ip,
+                    started,
+                )
+            if pickcode:
+                entry.pickcode = pickcode
+                self._index.upsert(entry)
+
         try:
-            url = self._u115.get_download_url(entry.pickcode, user_agent)
+            url = self._u115.get_download_url(pickcode, user_agent)
         except U115AuthError as err:
             return self._reject(502, f"115 授权失败：{err}", entry_id, user_agent, client_ip, started)
         except U115RateLimited as err:

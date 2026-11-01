@@ -229,50 +229,87 @@ class Reconciler:
 
     def _history_targets(self) -> Optional[List[Tuple[str, int, str]]]:
         """
-        从 MoviePilot 整理历史读取 115 目标视频（一次查询）。
+        从 MoviePilot 整理历史读取 115 目标视频（分页读取 SDK 快照）。
 
         :return: (路径, 大小, pickcode) 列表；读取失败返回 None
         """
         try:
-            from app.db import db
-            from app.db.models.transferhistory import TransferHistory
-        except Exception as err:  # noqa: BLE001 - 宿主模型不可用时回退扫描
-            logger.warning(f"【CloudStrmKit】无法导入整理历史模型，回退目录扫描：{err}")
-            return None
-        try:
-            rows = (
-                db.query(TransferHistory)
-                .filter(TransferHistory.dest_storage.isnot(None))
-                .order_by(TransferHistory.id.desc())
-                .limit(HISTORY_LIMIT)
-                .all()
-            )
-        except Exception as err:  # noqa: BLE001
-            logger.warning(f"【CloudStrmKit】读取整理历史失败，回退目录扫描：{err}")
+            from app.schemas.query import QueryPageRequest, TransferHistoryFilter
+            from app.sdk.queries import list_transfer_history
+        except Exception as err:  # noqa: BLE001 - 宿主接口不可用时回退扫描
+            logger.warning(f"【CloudStrmKit】无法导入整理历史查询接口：{err}")
             return None
         seen = set()
         targets: List[Tuple[str, int, str]] = []
-        for row in rows:
-            dest = str(getattr(row, "dest", "") or "").replace("\\", "/")
-            if not dest or dest in seen:
-                continue
-            if not self._is_target_storage(str(getattr(row, "dest_storage", "") or "")):
-                continue
-            ext = Path(dest).suffix.lstrip(".").lower()
-            if ext not in self._config.video_ext_set:
-                continue
-            seen.add(dest)
-            pickcode = ""
-            raw_item = getattr(row, "dest_fileitem", None)
-            if isinstance(raw_item, dict):
-                pickcode = str(raw_item.get("pickcode") or "")
-            targets.append((dest, 0, pickcode))
+        page = 1
+        while page <= 50:
+            try:
+                result = list_transfer_history(
+                    TransferHistoryFilter(),
+                    QueryPageRequest(page=page, count=200),
+                )
+            except Exception as err:  # noqa: BLE001
+                logger.warning(f"【CloudStrmKit】读取整理历史第 {page} 页失败：{err}")
+                if page == 1:
+                    return None
+                break
+            items = list(getattr(result, "items", None) or [])
+            if not items:
+                break
+            for row in items:
+                dest = str(getattr(row, "dest", "") or "").replace("\\", "/")
+                if not dest or dest in seen:
+                    continue
+                if not self._is_target_storage(str(getattr(row, "dest_storage", "") or "")):
+                    continue
+                ext = Path(dest).suffix.lstrip(".").lower()
+                if ext not in self._config.video_ext_set:
+                    continue
+                seen.add(dest)
+                pickcode = ""
+                raw_item = getattr(row, "dest_fileitem", None)
+                if isinstance(raw_item, dict):
+                    pickcode = str(raw_item.get("pickcode") or "")
+                targets.append((dest, 0, pickcode))
+            total = int(getattr(result, "total", 0) or 0)
+            if page * 200 >= total:
+                break
+            page += 1
         logger.info(f"【CloudStrmKit】整理历史对账：{len(targets)} 个 115 视频")
         return targets
 
     # ------------------------------------------------------------------
     # 主流程
     # ------------------------------------------------------------------
+    def probe_history(self) -> Dict[str, Any]:
+        """
+        诊断整理历史数据源（不生成任何文件）。
+
+        :return: 诊断结果
+        """
+        try:
+            from app.schemas.query import QueryPageRequest, TransferHistoryFilter
+            from app.sdk.queries import list_transfer_history
+        except Exception as err:  # noqa: BLE001
+            return {"ok": False, "error": f"导入失败：{err}"}
+        try:
+            first = list_transfer_history(
+                TransferHistoryFilter(), QueryPageRequest(page=1, count=1)
+            )
+            total = int(getattr(first, "total", 0) or 0)
+        except Exception as err:  # noqa: BLE001
+            return {"ok": False, "error": f"查询总数失败：{err}"}
+        targets = self._history_targets()
+        if targets is None:
+            return {"ok": False, "error": "读取整理历史失败", "total_history": total}
+        return {
+            "ok": True,
+            "total_history": total,
+            "targets": len(targets),
+            "mode": self._config.reconcile_mode,
+            "library_roots": self._config.library_roots,
+        }
+
     def run(self) -> Dict[str, Any]:
         """
         执行一次对账（同步阻塞，调用方负责放到后台线程）。
@@ -298,11 +335,13 @@ class Reconciler:
             scan_ok = False
             if self._config.reconcile_mode == "history":
                 history = self._history_targets()
-                if history is not None:
-                    videos = history
-                    scan_ok = True
-                else:
-                    videos, scan_ok = self._scan_library()
+                if history is None:
+                    result.update(
+                        success=False,
+                        message="整理历史读取失败（详见日志；可改用 scan 模式或查看 /diag/reconcile-source）",
+                    )
+                    return result
+                videos = history
             else:
                 videos, scan_ok = self._scan_library()
 
@@ -333,10 +372,9 @@ class Reconciler:
                 if entry is not None and strm_path.exists():
                     continue
                 try:
+                    # pickcode 缺失时不在对账阶段补查（否则数千次 115 请求极慢），
+                    # 由播放时按路径补查并回填索引。
                     pickcode = host_pickcode or pickcode_cache.get(pan_path) or ""
-                    if not pickcode:
-                        pickcode = self._u115.get_pickcode(pan_path)
-                        pickcode_cache[pan_path] = pickcode
                     entry = IndexEntry(
                         id=StrmIndex.make_id(pan_path),
                         pan_storage=self._config.source_storage,
