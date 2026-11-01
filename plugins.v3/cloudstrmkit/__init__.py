@@ -53,7 +53,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.2.1"
+    plugin_version = "0.2.2"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -359,6 +359,30 @@ class CloudStrmKit(_PluginBase):
         ext = Path(path).suffix.lstrip(".").lower()
         return bool(ext) and ext in self._config.video_ext_set
 
+    @staticmethod
+    def _to_media_type(value: Any) -> Optional[MediaType]:
+        """
+        把事件载荷中的媒体类型（可能是枚举字符串或中文值）转换为 MediaType。
+
+        :param value: 原始类型值
+        :return: MediaType 或 None
+        """
+        if not value:
+            return None
+        raw = str(value)
+        if "." in raw:
+            raw = raw.rsplit(".", 1)[-1]
+        normalized = raw.strip().lower()
+        mapping = {
+            "tv": MediaType.TV,
+            "tvshow": MediaType.TV,
+            "series": MediaType.TV,
+            "电视剧": MediaType.TV,
+            "movie": MediaType.MOVIE,
+            "电影": MediaType.MOVIE,
+        }
+        return mapping.get(normalized)
+
     def _worker_loop(self) -> None:
         """后台任务循环：串行处理生成任务。"""
         assert self._queue is not None
@@ -428,12 +452,7 @@ class CloudStrmKit(_PluginBase):
             )
             if fnos_dir is None or self._fnos is None:
                 continue
-            media_type = None
-            if media.get("type"):
-                try:
-                    media_type = MediaType(str(media.get("type")))
-                except Exception:  # noqa: BLE001
-                    media_type = None
+            media_type = self._to_media_type(media.get("type"))
             item = self._fnos.build_item(
                 title=media.get("title"),
                 year=media.get("year"),

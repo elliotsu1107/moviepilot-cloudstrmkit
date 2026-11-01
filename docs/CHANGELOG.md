@@ -3,6 +3,24 @@
 
 > 格式参考 Keep a Changelog；版本遵循 SemVer（v0.x 阶段）。
 
+## [v0.2.2] - 2026-11-01
+
+### 验证结论（核心链路，真实整理《仙逆》S01E165）
+
+| 验证项 | 结果 |
+|---|---|
+| V4 事件载荷 | ✅ 载荷为 dict，成功解析 `target_item.storage=u115`、115 路径、`pickcode`、`file_list_new`、`media.title/year/type` |
+| V5 路径映射 | ✅ 生成到 `/strm_test/tv/电视剧/国漫/仙逆 (2023)/Season 1/仙逆 S01E165 2160p.ADWeb.strm`，宿主侧可见 |
+| STRM 内容 | ✅ 含 `base_url + /play?f=&e=&sig=` 签名 URL |
+| 302 播放 | ✅ `/play` 返回 302，`Location` 为 115 CDN 直链，`Content-Disposition` 正确 |
+| UA 绑定 | ✅ 同 UA 请求直链返回 206 |
+
+### 修复
+
+- 媒体类型转换：事件载荷中的 `MediaType.TV` 字符串无法直接构造枚举，改为兼容 `MediaType.xxx` / `tv` / `movie` / 中文值。
+- 空索引真值判断（`__len__` 为 0 导致误判索引不存在）。
+- 事件载荷 dict/对象双兼容。
+
 ## [v0.2.0] - 2026-11-01
 
 ### 新增
