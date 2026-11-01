@@ -60,7 +60,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.5.4"
+    plugin_version = "0.6.1"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -328,6 +328,22 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "对账状态",
                 "description": "返回对账运行状态与最近一次结果",
+            },
+            {
+                "path": "/attachments/orphans",
+                "endpoint": self.api_scan_orphans,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "孤儿附属文件清单",
+                "description": "扫描 STRM 目录下没有对应 .strm 的附属文件（只读）",
+            },
+            {
+                "path": "/attachments/cleanup",
+                "endpoint": self.api_cleanup_orphans,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "清理孤儿附属文件",
+                "description": "删除用户确认的孤儿附属文件（仅限 STRM 根目录与白名单扩展名）",
             },
         ]
 
@@ -690,6 +706,36 @@ class CloudStrmKit(_PluginBase):
                 "library_roots": self._config.library_roots,
             },
         }
+
+    def api_scan_orphans(self) -> Dict[str, Any]:
+        """
+        扫描本地 STRM 目录下的孤儿附属文件（只读）。
+
+        :return: 统一响应结构
+        """
+        if self._attachments is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        items = self._attachments.scan_orphans(self._config.strm_root_local)
+        return {"success": True, "message": "", "data": {"items": items, "count": len(items)}}
+
+    def api_cleanup_orphans(self, paths: str = "") -> Dict[str, Any]:
+        """
+        删除用户确认的孤儿附属文件。
+
+        :param paths: 逗号分隔的绝对路径列表
+        :return: 统一响应结构
+        """
+        if self._attachments is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        files = [item.strip() for item in (paths or "").split(",") if item.strip()]
+        if not files:
+            return {
+                "success": False,
+                "message": "缺少 paths 参数（逗号分隔的绝对路径）",
+                "data": None,
+            }
+        result = self._attachments.cleanup_orphans(self._config.strm_root_local, files)
+        return {"success": True, "message": "", "data": result}
 
     # ------------------------------------------------------------------
     # 配置页

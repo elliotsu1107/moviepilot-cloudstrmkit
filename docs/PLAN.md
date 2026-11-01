@@ -64,10 +64,34 @@
 
 > 每个任务的验证命令/日志/截图记在此处或 `docs/CHANGELOG.md`（L1 不设独立 evidence 目录）。
 
-| 任务 | 证据 |
+### 5.1 验收清单核对（对照 PRD A1–A15）
+
+| # | 验收项 | 结果 | 证据 |
+|---|---|---|---|
+| A1 | 整理完成到 STRM 落盘 | ✅ | 真实整理《仙逆》S01E165 → `/strm_test/tv/电视剧/国漫/仙逆 (2023)/Season 1/仙逆 S01E165 2160p.ADWeb.strm` 落盘 |
+| A2 | STRM 内容格式 | ✅ | 单行 URL，含 `/play?f=&e=&sig=` |
+| A3 | 飞牛媒体库刷新 | ✅ | 飞牛测试媒体库出现《仙逆》，用户确认 |
+| A4 | 302 返回 | ✅ | `/play` → 302，`Location` 指向 115 CDN，同 UA 直链 206 |
+| A5 | UA 绑定 | ✅ | `trim_player` 换链→同 UA 200；异 UA 403；缓存键按 UA 隔离 |
+| A6 | 签名与过期 | ✅ | 篡改 `sig` → 403；过期 `e=1` → 403；错误 `f` → 403 |
+| A7 | 对账补漏 | ✅ | 误删事故后 history 对账全量重建 2473 个 STRM（3.8 秒） |
+| A8 | 实时性与带宽 | 🟡 | 架构保证（302 只返回重定向，不转发视频流）；待流量监控截图 |
+| A9 | 三端播放实测 | 🟡 | 内网/外网/安卓客户端均已实测通过；FN ID 场景待验证 |
+| A10 | 不影响 MP 既有功能 | 🟡 | 插件运行期间 MP 整理、飞牛播放、MP 重启均正常；待正式观察 |
+| A11 | 刮削文件同步 | 🟡 | 同步逻辑已实现；待整理一部带 NFO/海报的影片实测 |
+| A12 | 不误删用户文件 | ✅ | `_test` 目录放入 `manual.nfo`/`other.strm` → 对账 `removed=0`，两文件保留；清理工具拒绝非白名单 `other.strm` |
+| A13 | 无公网降级模式 | ⏳ | 暂缓（用户暂无网络条件测试） |
+| A14 | 覆盖与改名 | 🟡 | 覆盖整理由事件驱动覆写同路径 STRM（不重复）；115 改名后旧 STRM 清理需 `scan` 模式 |
+| A15 | 旧附属文件清理 | ✅ | `/attachments/orphans` 扫描出孤儿 `manual.nfo` → `/attachments/cleanup` 确认后删除成功；非白名单文件拒绝 |
+
+### 5.2 关键验证命令
+
+| 验证 | 命令 |
 |---|---|
-| T3/V1 | `/diag/u115` 实测 3 组 UA：同 UA 请求直链 206、异 UA 403；宿主链路换链失败而直连成功 |
-| T3/V4 | 待一次真实整理事件后读取 `/diag/event-log` |
-| T7/V2 | 待真实整理验证飞牛媒体库刷新 |
-| T8 | 待真机播放验证 302 |
-| T11 | 待联调 |
+| 健康检查 | `GET /api/v1/plugin/CloudStrmKit/ping` |
+| 302 播放 | `curl -I -A "trim_player" "<STRM内容URL>"` |
+| 签名/过期 | 篡改 `sig` 或改 `e` 后请求 → 403 |
+| 对账 | `POST /api/v1/plugin/CloudStrmKit/reconcile` + `GET /reconcile/status` |
+| 孤儿清理 | `GET /attachments/orphans` → `POST /attachments/cleanup?paths=...` |
+| 115 探针 | `GET /diag/u115?path=<115路径>` |
+| 对账数据源 | `GET /diag/reconcile-source` |

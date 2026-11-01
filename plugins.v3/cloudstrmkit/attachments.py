@@ -261,3 +261,84 @@ class AttachmentSyncer:
         if removed:
             self._index.remove_dir_attachments(pan_dir)
         return removed
+
+    def scan_orphans(self, strm_root: str) -> List[Dict[str, Any]]:
+        """
+        扫描本地 STRM 目录下没有对应 .strm 的附属文件（孤儿）。
+
+        :param strm_root: 本地 STRM 根目录（容器内路径）
+        :return: 孤儿文件列表（path/name/size）
+        """
+        root = Path(strm_root or "")
+        if not strm_root or not root.is_dir():
+            return []
+        orphans: List[Dict[str, Any]] = []
+        for path in root.rglob("*"):
+            try:
+                if not path.is_file():
+                    continue
+            except OSError:
+                continue
+            ext = path.suffix.lstrip(".").lower()
+            if ext not in self._config.copy_ext_set:
+                continue
+            if path.with_suffix(".strm").exists():
+                continue
+            if _is_common_attachment(path.name):
+                # 目录级海报：目录内存在任意 .strm 时视为有效
+                if any(path.parent.glob("*.strm")):
+                    continue
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+            orphans.append(
+                {
+                    "path": str(path),
+                    "name": path.name,
+                    "size": size,
+                }
+            )
+        return orphans
+
+    def cleanup_orphans(self, strm_root: str, files: List[str]) -> Dict[str, Any]:
+        """
+        删除用户确认的孤儿附属文件（仅限 STRM 根目录内、白名单扩展名）。
+
+        :param strm_root: 本地 STRM 根目录
+        :param files: 待删除文件路径列表
+        :return: 处理结果统计
+        """
+        root = Path(strm_root or "")
+        if not strm_root or not root.is_dir():
+            return {"removed": 0, "skipped": 0, "errors": ["STRM 根目录不存在"]}
+        try:
+            root_str = str(root.resolve()).rstrip("/")
+        except OSError:
+            root_str = str(root).rstrip("/")
+        removed = 0
+        skipped = 0
+        errors: List[str] = []
+        for raw in files or []:
+            target = Path(raw)
+            try:
+                target_str = str(target.resolve())
+            except OSError:
+                target_str = str(target)
+            if not (target_str == root_str or target_str.startswith(root_str + "/")):
+                skipped += 1
+                errors.append(f"不在 STRM 根目录内：{raw}")
+                continue
+            if target.suffix.lstrip(".").lower() not in self._config.copy_ext_set:
+                skipped += 1
+                errors.append(f"扩展名不在白名单：{raw}")
+                continue
+            try:
+                if target.exists():
+                    target.unlink()
+                    removed += 1
+                else:
+                    skipped += 1
+            except Exception as err:  # noqa: BLE001
+                errors.append(f"{target}: {err}")
+        return {"removed": removed, "skipped": skipped, "errors": errors}
