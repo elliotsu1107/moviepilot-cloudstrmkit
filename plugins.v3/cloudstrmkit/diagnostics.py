@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from pathlib import Path
@@ -167,9 +168,43 @@ def probe_u115_download(
             return result
         pickcode = str(item.pickcode)
         result["pickcode"] = pickcode
+        try:
+            result["has_token"] = bool(getattr(pan, "access_token", None))
+        except Exception as err:  # noqa: BLE001
+            result["has_token"] = f"ERR:{err}"
     except Exception as err:  # noqa: BLE001 - 诊断接口需要把错误回给调用方
         result["error"] = f"初始化 115 存储失败：{err}"
         return result
+
+    # 直连测试：绕过宿主 RequestUtils（及其代理配置），确认是网络层还是参数层问题
+    try:
+        result["direct"] = _request_115_direct(pan, pickcode)
+    except Exception as err:  # noqa: BLE001
+        result["direct"] = {"error": f"{err}"}
+
+    # UA 绑定验证：每个 UA 独立换链，再用同 UA / 异 UA 请求同一直链
+    result["direct_ua_tests"] = []
+    for ua in user_agents:
+        chain_ua = ua or "W115Storage/2.0"
+        entry: Dict[str, Any] = {"ua": ua, "chain_ua": chain_ua}
+        try:
+            chained = _request_115_direct(pan, pickcode, chain_ua)
+            entry["chain_code"] = chained.get("code")
+            entry["chain_status"] = chained.get("status")
+            url = chained.get("url")
+            if url:
+                entry["same_ua_status"] = _probe_url(url, chain_ua)
+                other_ua = next(
+                    (item or "W115Storage/2.0" for item in user_agents if (item or "W115Storage/2.0") != chain_ua),
+                    "Mozilla/5.0",
+                )
+                entry["cross_ua"] = other_ua
+                entry["cross_status"] = _probe_url(url, other_ua)
+            else:
+                entry["error"] = chained.get("message") or chained.get("body") or "换链失败"
+        except Exception as err:  # noqa: BLE001
+            entry["error"] = f"{err}"
+        result["direct_ua_tests"].append(entry)
 
     for ua in user_agents:
         entry: Dict[str, Any] = {"ua": ua, "url": None, "http_status": None}
@@ -200,6 +235,52 @@ def probe_u115_download(
 
     result["ok"] = True
     return result
+
+
+def _request_115_direct(
+    pan: Any, pickcode: str, user_agent: str = "W115Storage/2.0"
+) -> Dict[str, Any]:
+    """
+    绕过宿主 RequestUtils（及其代理配置），用 token 直连 115 开放平台 downurl。
+
+    用于区分“代理/网络层失败”与“参数/授权失败”，并支持指定换链 UA。
+
+    :param pan: 115 存储实例
+    :param pickcode: 文件提取码
+    :param user_agent: 换链请求使用的 UA（直链会绑定该 UA）
+    :return: 状态码、业务码、直链
+    """
+    token = getattr(pan, "access_token", None)
+    if not token:
+        return {"error": "无 access_token"}
+    url = "https://proapi.115.com/open/ufile/downurl"
+    data = urllib.parse.urlencode({"pick_code": pickcode}).encode()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": user_agent or "W115Storage/2.0",
+        "Content-Type": "application/x-www-form-urlencoded",
+    }
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(request, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            parsed: Dict[str, Any] = {"status": resp.status, "code": None, "message": "", "url": None}
+            try:
+                payload = json.loads(raw)
+                parsed["code"] = payload.get("code")
+                parsed["message"] = payload.get("message")
+                first = next(iter((payload.get("data") or {}).values()), None)
+                if isinstance(first, dict):
+                    parsed["url"] = (first.get("url") or {}).get("url")
+            except Exception:  # noqa: BLE001 - 非 JSON 响应只回摘要
+                parsed["body"] = raw[:300]
+            return parsed
+    except urllib.error.HTTPError as err:
+        body = err.read(300).decode("utf-8", errors="replace") if hasattr(err, "read") else ""
+        return {"status": err.code, "body": body}
+    except Exception as err:  # noqa: BLE001
+        return {"error": f"{err}"}
 
 
 def _extract_first_url(download_info: Dict[str, Any]) -> Optional[str]:

@@ -37,10 +37,10 @@
 |---|---|---|---|
 | 运行形态 | MoviePilot v3 插件（同进程） | 零新增服务；复用宿主 115 授权、飞牛客户端、事件总线、HTTP 端口与现成反代 | 独立服务：多一个容器/端口，与"零外部服务"目标冲突 |
 | 语言/运行时 | Python 3.14 | 宿主环境 | Go 独立二进制：违背插件形态 |
-| 115 直链 | 复用宿主 `U115Pan`（access_token + `/open/ufile/downurl`） | 无需额外授权，与 P115StrmHelper 验证过的路径一致 | p115client：重依赖；自带 OAuth：多一套授权流程 |
+| 115 直链 | **插件内直连 115 开放平台**：从宿主 115 存储取 token，用 `urllib` 禁用环境代理请求 `/open/ufile/downurl`，以请求方 UA 换链 | V1 实测：宿主 `U115Pan._request_api` 受 MP 容器 `HTTP_PROXY` 影响换链失败，直连成功；且直链绑定换链 UA | p115client：重依赖；复用宿主 RequestUtils：代理环境不可靠 |
 | 数据存储 | 插件数据目录 JSON 索引（原子写 + 线程锁） | 数据量小（< 10k 条）、无外部依赖、可读可备份 | SQLite：可用插件 get_database，但 JSON 足够；预留升级 |
 | 直链缓存 | 进程内 TTL 缓存 + LRU 上限 | 限频/防风控；无需持久化（重启可重建） | 磁盘缓存：收益低 |
-| HTTP 客户端 | 复用宿主 `RequestUtils`（`app/sdk/network.py`） | 统一超时/重试/代理配置 | 自建 httpx：重复造轮子 |
+| HTTP 客户端 | 标准库 `urllib`（显式 `ProxyHandler({})` 禁代理） | 规避 MP 容器全局代理；无第三方依赖 | 宿主 RequestUtils：受代理配置影响（实测换链失败） |
 | 前端配置页 | Vuetify JSON 组件树（宿主原生） | 插件标准做法 | Vue 自定义页：重 |
 
 ### 2.2 模块划分
@@ -53,7 +53,7 @@ plugins.v3/cloudstrmkit/
 ├── index.py           # STRM 索引：加载/保存/增删改查/锁
 ├── strm.py            # 路径映射、STRM 内容生成、原子写入/删除
 ├── redirect.py        # /play 实现：验签、UA 换链、缓存、限频、锁、302 响应
-├── u115.py            # 115 直链换取与目录/文件查询封装（宿主 U115Pan 复用 + 错误分类）
+├── u115.py            # 115 直链换取（宿主 token + 直连 API + 请求方 UA 绑定）与 pickcode 查询
 ├── attachments.py     # 刮削附属文件同步（115 → 本地 NFO/海报/字幕）
 ├── fnos.py            # 飞牛刷新封装（去抖合并、路径映射、降级）
 ├── reconcile.py       # 对账：115 目录遍历、差异计算、执行
@@ -204,14 +204,18 @@ hmac = HMAC_SHA256(secret, f"{id}:{expire_ts}")[:32]
 ### 4.5 302 服务（`redirect.py`）
 
 ```
-GET/HEAD /api/v1/plugin/cloudstrmkit/play?f=&e=&sig=
+GET/HEAD /api/v1/plugin/<id>/play?f=&e=&sig=
   1. 验签、验过期 → 403
   2. 查索引 → 无 → 404（写日志）
-  3. 缓存命中 → 302
+  3. 缓存命中（键 = pickcode + UA）→ 302
   4. 换链：u115.get_download_url(pickcode, ua=request.headers["user-agent"])
+     - 直连 proapi.115.com，显式禁用环境代理
+     - 直链与换链 UA 绑定（V1 实测），因此必须原样使用请求方 UA
   5. 失败分类：401/403 授权失效 → 502 + 告警；429/风控 → 503 + 冷却
   6. 302 + Content-Disposition
 ```
+
+> 实测：直链绑定换链 UA（同 UA 206、异 UA 403）；因此 302 后客户端会沿用同一 UA 请求 115 CDN，能正常播放。
 
 - 限频：全局 `threading.Semaphore` + 令牌桶（默认 2 QPS）。
 - 冷却：风控触发后 `cooldown_seconds`（默认 60s）内直接 503，避免放大风控。
