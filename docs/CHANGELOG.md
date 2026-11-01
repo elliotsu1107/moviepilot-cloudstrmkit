@@ -42,6 +42,12 @@
 - MoviePilot compose：新增 `plugins-src` 挂载、`PLUGIN_LOCAL_REPO_PATHS` 指向项目根、`PLUGIN_AUTO_RELOAD=true`。
 - 待验证：MP 插件市场「本地插件」安装 CloudStrmKit、`/api/v1/plugin/cloudstrmkit/ping` 返回正常。
 
+### 文档脱敏与历史重建（2026-11-01）
+
+- 项目文档与代码移除真实环境信息（NAS 路径、本机路径、飞牛实例名），统一替换为占位符；`scripts/sync-to-nas.ps1` 改为通过 `-Target` 参数或环境变量 `CLOUDSTRMKIT_DEPLOY_DIR` 指定部署目录，不再硬编码机器路径。
+- GitHub 仓库历史重建为单一干净提交并强制推送；如需彻底清除旧 dangling 提交，可在 GitHub 删除仓库后重建。
+- 明确测试隔离策略：阶段 1 保留旧媒体库与旧 STRM 目录（飞牛照常使用），插件只写新目录并在飞牛新建测试媒体库验证；阶段 2 验收通过后再切换/迁移飞牛媒体库。
+
 ### 待办
 
 - Day 0 预研（本地插件仓安装验证等 4 项）。
