@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -24,7 +25,7 @@ from .config import CloudStrmKitConfig
 from .fnos import FnosRefresher
 from .index import IndexEntry, StrmIndex
 from .strm import PathMapper, StrmContentBuilder, remove_strm, write_strm
-from .u115 import U115Client, U115Error
+from .u115 import U115Client, U115Error, U115NotFound
 
 # 目录遍历最大深度
 MAX_DEPTH = 8
@@ -32,6 +33,8 @@ MAX_DEPTH = 8
 MAX_ITEMS = 20000
 # 整理历史最大读取条数
 HISTORY_LIMIT = 10000
+# 待确认删除记录文件名
+PENDING_FILENAME = "pending_deletions.json"
 
 
 class Reconciler:
@@ -71,6 +74,131 @@ class Reconciler:
         self._lock = threading.Lock()
         self._running = False
         self._last_run: Optional[Dict[str, Any]] = None
+        self._pending_path = Path(index.path).parent / PENDING_FILENAME
+        self._pending: List[Dict[str, Any]] = self._load_pending()
+
+    # ------------------------------------------------------------------
+    # 待确认删除
+    # ------------------------------------------------------------------
+    def _load_pending(self) -> List[Dict[str, Any]]:
+        """
+        从磁盘加载待确认删除记录。
+
+        :return: 待删除项列表
+        """
+        try:
+            if self._pending_path.exists():
+                payload = json.loads(self._pending_path.read_text(encoding="utf-8"))
+                items = payload.get("items") or []
+                return [item for item in items if isinstance(item, dict)]
+        except Exception as err:  # noqa: BLE001 - 损坏时忽略
+            logger.warning(f"【CloudStrmKit】加载待确认删除失败：{err}")
+        return []
+
+    def _save_pending(self, entries: List[IndexEntry]) -> None:
+        """
+        持久化待确认删除记录。
+
+        :param entries: 候选索引条目
+        """
+        self._pending = [
+            {
+                "id": entry.id,
+                "pan_path": entry.pan_path,
+                "strm_path": entry.strm_path,
+            }
+            for entry in entries
+        ]
+        try:
+            self._pending_path.parent.mkdir(parents=True, exist_ok=True)
+            self._pending_path.write_text(
+                json.dumps({"items": self._pending}, ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"【CloudStrmKit】保存待确认删除失败：{err}")
+
+    def list_pending(self) -> List[Dict[str, Any]]:
+        """
+        返回待确认删除列表。
+
+        :return: 待删除项列表
+        """
+        return list(self._pending)
+
+    def cancel_pending(self) -> int:
+        """
+        清空待确认删除列表（不删除任何文件）。
+
+        :return: 清空数量
+        """
+        count = len(self._pending)
+        self._pending = []
+        try:
+            if self._pending_path.exists():
+                self._pending_path.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+        return count
+
+    def confirm_pending(self) -> Dict[str, Any]:
+        """
+        执行用户确认后的删除（删除本地 STRM 与索引条目）。
+
+        :return: 删除结果
+        """
+        removed = 0
+        failed = 0
+        for item in list(self._pending):
+            entry = self._index.get(str(item.get("id") or ""))
+            if entry is None:
+                continue
+            try:
+                remove_strm(Path(entry.strm_path))
+                if self._index.remove(entry.id) is not None:
+                    removed += 1
+            except Exception as err:  # noqa: BLE001
+                failed += 1
+                logger.warning(f"【CloudStrmKit】确认删除失败：{entry.strm_path}：{err}")
+        self._pending = []
+        try:
+            if self._pending_path.exists():
+                self._pending_path.unlink()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(f"【CloudStrmKit】确认删除完成：{removed} 条，失败 {failed}")
+        return {"removed": removed, "failed": failed}
+
+    def _delete_candidates(self, candidates: List[IndexEntry]) -> Tuple[int, bool]:
+        """
+        删除候选条目（可逐条确认 115 文件确实不存在，异常时中止）。
+
+        :param candidates: 候选索引条目
+        :return: (删除数量, 是否因 115 查询异常中止)
+        """
+        removed = 0
+        for entry in candidates:
+            if self._config.delete_sync_verify:
+                try:
+                    self._u115.get_pickcode(entry.pan_path)
+                    logger.debug(
+                        f"【CloudStrmKit】115 仍有文件，跳过删除：{entry.pan_path}"
+                    )
+                    continue
+                except U115NotFound:
+                    pass
+                except U115Error as err:
+                    logger.error(
+                        f"【CloudStrmKit】删除前确认失败，中止删除：{entry.pan_path}：{err}"
+                    )
+                    return removed, True
+            try:
+                remove_strm(Path(entry.strm_path))
+                if self._index.remove(entry.id) is not None:
+                    removed += 1
+            except Exception as err:  # noqa: BLE001
+                logger.warning(f"【CloudStrmKit】清理孤儿失败：{entry.strm_path}：{err}")
+        return removed, False
 
     @property
     def running(self) -> bool:
@@ -444,27 +572,63 @@ class Reconciler:
             if new_entries:
                 self._index.add_many(new_entries)
 
-            # 2. 清理孤儿（仅全库扫描模式、扫描成功且有结果时执行）
+            # 2. 清理孤儿（仅全库扫描模式、扫描成功且有结果时执行；带批量保护）
             if (
                 self._config.delete_sync
                 and self._config.reconcile_mode == "scan"
                 and scan_ok
                 and result["scanned"] > 0
             ):
-                for entry in self._index.all_items():
-                    if not self._within_roots(entry.pan_path):
-                        continue
-                    if entry.pan_path in pan_paths:
-                        continue
-                    try:
-                        remove_strm(Path(entry.strm_path))
-                        self._index.remove(entry.id)
-                        result["removed"] += 1
-                        refresh_dirs.append(Path(entry.strm_path).parent)
-                    except Exception as err:  # noqa: BLE001
-                        logger.warning(
-                            f"【CloudStrmKit】清理孤儿失败：{entry.strm_path}：{err}"
+                candidates = [
+                    entry
+                    for entry in self._index.all_items()
+                    if self._within_roots(entry.pan_path)
+                    and entry.pan_path not in pan_paths
+                ]
+                if candidates:
+                    total_indexed = max(1, len(self._index))
+                    ratio = len(candidates) / total_indexed
+                    need_confirm = (
+                        len(candidates) > self._config.delete_sync_batch_limit
+                        or ratio > self._config.delete_sync_max_ratio
+                    )
+                    if need_confirm:
+                        self._save_pending(candidates)
+                        result["pending_confirm"] = len(candidates)
+                        result["message"] = (
+                            f"检测到 {len(candidates)} 个本地 STRM 对应 115 文件不存在"
+                            f"（占索引 {ratio:.1%}），超过自动删除阈值，"
+                            f"已挂起等待确认（GET /delete/pending → POST /delete/confirm）"
                         )
+                        logger.warning(f"【CloudStrmKit】{result['message']}")
+                        if self._notifier is not None:
+                            self._notifier.send(
+                                "CloudStrmKit 待确认删除",
+                                result["message"],
+                                dedupe_key="delete_pending",
+                                cooldown=600,
+                            )
+                    else:
+                        removed, aborted = self._delete_candidates(candidates)
+                        result["removed"] = removed
+                        if aborted:
+                            result["message"] = (
+                                f"删除过程中检测到 115 查询异常，已中止"
+                                f"（已删除 {removed} 条），疑似 115 故障，请检查"
+                            )
+                            logger.error(f"【CloudStrmKit】{result['message']}")
+                            if self._notifier is not None:
+                                self._notifier.send(
+                                    "CloudStrmKit 删除中止",
+                                    result["message"],
+                                    dedupe_key="delete_abort",
+                                    cooldown=600,
+                                )
+                        else:
+                            for entry in candidates:
+                                path = Path(str(entry.strm_path))
+                                if path.parent.exists():
+                                    refresh_dirs.append(path.parent)
 
             # 3. 飞牛刷新（去重）
             if self._fnos is not None:

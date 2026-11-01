@@ -61,7 +61,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.9.1"
+    plugin_version = "0.10.0"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -362,6 +362,30 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "对账状态",
                 "description": "返回对账运行状态与最近一次结果",
+            },
+            {
+                "path": "/delete/pending",
+                "endpoint": self.api_delete_pending,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "待确认删除列表",
+                "description": "返回因超过阈值而挂起的待删除 STRM 列表（不执行删除）",
+            },
+            {
+                "path": "/delete/confirm",
+                "endpoint": self.api_delete_confirm,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "确认删除",
+                "description": "执行挂起的待删除列表（删除本地 STRM 与索引条目）",
+            },
+            {
+                "path": "/delete/cancel",
+                "endpoint": self.api_delete_cancel,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "取消删除",
+                "description": "清空待确认删除列表，不删除任何文件",
             },
             {
                 "path": "/attachments/orphans",
@@ -800,8 +824,46 @@ class CloudStrmKit(_PluginBase):
                 "last_run": self._reconciler.last_run,
                 "cron": self._config.reconcile_cron,
                 "library_roots": self._config.library_roots,
+                "pending_deletions": len(self._reconciler.list_pending()),
             },
         }
+
+    def api_delete_pending(self) -> Dict[str, Any]:
+        """
+        返回待确认删除列表。
+
+        :return: 统一响应结构
+        """
+        if self._reconciler is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        items = self._reconciler.list_pending()
+        return {
+            "success": True,
+            "message": "",
+            "data": {"items": items, "count": len(items)},
+        }
+
+    def api_delete_confirm(self) -> Dict[str, Any]:
+        """
+        执行挂起的待删除列表。
+
+        :return: 统一响应结构
+        """
+        if self._reconciler is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        result = self._reconciler.confirm_pending()
+        return {"success": True, "message": "", "data": result}
+
+    def api_delete_cancel(self) -> Dict[str, Any]:
+        """
+        清空待确认删除列表（不删除文件）。
+
+        :return: 统一响应结构
+        """
+        if self._reconciler is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        count = self._reconciler.cancel_pending()
+        return {"success": True, "message": "", "data": {"cleared": count}}
 
     def api_scan_orphans(self) -> Dict[str, Any]:
         """
@@ -1329,6 +1391,47 @@ class CloudStrmKit(_PluginBase):
                                         "props": {
                                             "model": "delete_sync",
                                             "label": "115 删除后同步删除本地文件",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "delete_sync_verify",
+                                            "label": "删除前逐条确认 115 不存在（防误删）",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "delete_sync_batch_limit",
+                                            "label": "单次自动删除上限（条）",
+                                            "type": "number",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "delete_sync_max_ratio",
+                                            "label": "删除占索引比例上限（0-1）",
+                                            "type": "number",
                                         },
                                     }
                                 ],

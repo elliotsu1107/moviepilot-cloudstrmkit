@@ -66,6 +66,15 @@ class CloudStrmKitConfig(BaseModel):
         default=False, description="对账时同步附属文件（首次全量建议关闭）"
     )
     delete_sync: bool = Field(default=True, description="115 删除后同步删除本地文件")
+    delete_sync_verify: bool = Field(
+        default=True, description="删除前逐条确认 115 文件确实不存在（防误删）"
+    )
+    delete_sync_batch_limit: int = Field(
+        default=20, ge=1, description="单次最多自动删除条数，超过需人工确认"
+    )
+    delete_sync_max_ratio: float = Field(
+        default=0.2, ge=0.0, le=1.0, description="单次删除占索引比例上限，超过需人工确认"
+    )
     debug: bool = Field(default=False, description="调试日志")
 
     # 通知
