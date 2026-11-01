@@ -67,21 +67,21 @@ qB 下载完成 → MoviePilot 整理并上传 115（本地保留做种）
 
 ## 目录规划（STRM 落点）
 
-原则：**容器内路径固定、宿主路径可配**。插件写文件用容器内 `/strm`（默认），飞牛刷新用配置的宿主路径（`strm_root_fnos`）。这样以后换目录只改挂载和配置，代码不动。
+原则：**容器内路径固定、宿主路径可配**。插件写文件用容器内 `/strm_test`（默认），飞牛刷新用配置的宿主路径（`strm_root_fnos`）。这样以后换目录只改挂载和配置，代码不动。
 
 ### 推荐目录
 
 | 项 | 建议 |
 |---|---|
 | 宿主 STRM 根 | 独立媒体目录（如 `/path/to/strm`），不要放在 MP 的 `config` 目录内，也不要放在下载目录内 |
-| 容器内 STRM 根 | 固定 `/strm`（插件 `strm_root_local` 默认值） |
+| 容器内 STRM 根 | 固定 `/strm_test`（插件 `strm_root_local` 默认值） |
 | 飞牛媒体库 | 直接指向宿主 STRM 根 |
 | 目录层级 | 与 115 路径保持一致，不要多级嵌套过深（路径映射难维护） |
 
 ### 目录结构（与 115 路径一致）
 
 ```
-/path/to/strm/            # 宿主 STRM 根 → 容器内 /strm
+/path/to/strm/            # 宿主 STRM 根 → 容器内 /strm_test
 ├── movie/电影/华语电影/<影片>/<影片>.strm
 ├── movie/电影/外语电影/<影片>/<影片>.strm
 └── tv/电视剧/国产剧/<剧名>/Season 1/<集>.strm
@@ -92,14 +92,14 @@ qB 下载完成 → MoviePilot 整理并上传 115（本地保留做种）
 ```yaml
 # docker-compose（MP 容器）
 volumes:
-  - /path/to/strm:/strm
+  - /path/to/strm:/strm_test
 ```
 
 | 插件配置 | 值 |
 |---|---|
-| `strm_root_local` | `/strm` |
+| `strm_root_local` | `/strm_test` |
 | `strm_root_fnos` | `/path/to/strm` |
-| `path_mappings` | `/movie => /strm/movie`<br>`/tv => /strm/tv` |
+| `path_mappings` | `/movie => /strm_test/movie`<br>`/tv => /strm_test/tv` |
 
 ### 测试隔离与切换策略
 

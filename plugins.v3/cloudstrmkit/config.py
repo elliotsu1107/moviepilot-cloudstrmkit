@@ -32,7 +32,7 @@ class CloudStrmKitConfig(BaseModel):
     base_url: str = Field(default="", description="对外基础地址")
 
     # STRM 路径
-    strm_root_local: str = Field(default="/strm", description="容器内 STRM 根目录")
+    strm_root_local: str = Field(default="/strm_test", description="容器内 STRM 根目录")
     strm_root_fnos: str = Field(default="", description="飞牛视角 STRM 根目录")
     # 路径映射：每行「115前缀 => 容器内根」
     path_mappings: str = Field(default="", description="115 路径到容器内 STRM 根的映射")

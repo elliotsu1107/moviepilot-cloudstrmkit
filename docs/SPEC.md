@@ -180,9 +180,9 @@ async def on_transfer_complete(event) -> None:
 
 | 配置 | 含义 | 示例 |
 |---|---|---|
-| `strm_root_local` | 容器内 STRM 根目录（插件写入用） | `/strm` |
+| `strm_root_local` | 容器内 STRM 根目录（插件写入用） | `/strm_test` |
 | `strm_root_fnos` | 飞牛视角 STRM 根目录（刷新时传给飞牛） | `/path/to/strm` |
-| `path_mappings` | 115 前缀 => 容器内 STRM 根，每行一条 | `/movie => /strm/movie`<br>`/tv => /strm/tv` |
+| `path_mappings` | 115 前缀 => 容器内 STRM 根，每行一条 | `/movie => /strm_test/movie`<br>`/tv => /strm_test/tv` |
 
 流程：
 
@@ -301,7 +301,7 @@ Vuetify 表单分三组：
 | `source_storage` | string | `u115` | 目标存储类型 |
 | `fnos_instance` | string | 空 | MoviePilot 中飞牛媒体服务器实例名 |
 | `base_url` | string | 空 | MP 对外地址（公网域名，无尾斜杠） |
-| `strm_root_local` | string | `/strm` | 容器内 STRM 根目录（写入用） |
+| `strm_root_local` | string | `/strm_test` | 容器内 STRM 根目录（写入用） |
 | `strm_root_fnos` | string | 空 | 飞牛视角 STRM 根目录（刷新用，NAS 宿主路径） |
 | `path_mappings` | text | 空 | `115前缀 => 容器内根`，每行一条 |
 | `video_exts` | string | `mkv,mp4,ts,m2ts,avi,mov,wmv` | 视频扩展名 |
@@ -325,8 +325,8 @@ Vuetify 表单分三组：
 
 1. **插件目录**：开发期用 `PLUGIN_LOCAL_REPO_PATHS` 挂载本地仓库（目录结构 `plugins.v3/cloudstrmkit/`），MP 自动发现热加载。
 2. **容器挂载**（必须）：
-   - 宿主 STRM 目录 → 容器内固定路径，推荐容器内统一为 `/strm`（插件 `strm_root_local` 默认即此）
-     示例：`- /path/to/strm:/strm`
+   - 宿主 STRM 目录 → 容器内固定路径，推荐容器内统一为 `/strm_test`（插件 `strm_root_local` 默认即此）
+     示例：`- /path/to/strm:/strm_test`
    - 插件数据目录（默认在 MP 的 `config/plugin_data`）
 3. **路径对照**：`strm_root_fnos` 填宿主/飞牛视角路径（如 `/path/to/strm`），用于飞牛刷新时传 `target_path`；容器内路径由插件用 `strm_root_local` 换算。
 4. **MP 容器端口**：复用 3001 + 现有 Lucky 反代域名；无需新增端口。

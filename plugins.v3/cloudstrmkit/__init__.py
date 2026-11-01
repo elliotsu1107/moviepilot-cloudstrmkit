@@ -259,7 +259,7 @@ class CloudStrmKit(_PluginBase):
                                         "props": {
                                             "model": "strm_root_local",
                                             "label": "容器内 STRM 根目录",
-                                            "placeholder": "/strm",
+                                            "placeholder": "/strm_test",
                                         },
                                     }
                                 ],
@@ -321,7 +321,7 @@ class CloudStrmKit(_PluginBase):
                                             "model": "path_mappings",
                                             "label": "路径映射（每行：115前缀 => 容器内根目录）",
                                             "rows": 4,
-                                            "placeholder": "/movie => /strm/movie\n/tv => /strm/tv",
+                                            "placeholder": "/movie => /strm_test/movie\n/tv => /strm_test/tv",
                                         },
                                     }
                                 ],
