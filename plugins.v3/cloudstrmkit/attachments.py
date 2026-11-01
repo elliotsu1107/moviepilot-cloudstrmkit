@@ -90,6 +90,11 @@ class AttachmentSyncer:
         self._config = config
         self._u115 = u115
         self._index = index
+        self._dir_cache: Dict[str, List[Any]] = {}
+
+    def clear_cache(self) -> None:
+        """清空目录列举缓存（对账前调用，避免使用过期目录数据）。"""
+        self._dir_cache.clear()
 
     def _list_pan_dir(self, pan_dir: str) -> Optional[List[Any]]:
         """
@@ -98,6 +103,8 @@ class AttachmentSyncer:
         :param pan_dir: 115 目录路径
         :return: FileItem 列表或 None（失败）
         """
+        if pan_dir in self._dir_cache:
+            return self._dir_cache[pan_dir]
         try:
             from app.modules.filemanager.storages.u115 import U115Pan
 
@@ -110,7 +117,9 @@ class AttachmentSyncer:
         except Exception as err:  # noqa: BLE001 - 目录列举失败不阻断主流程
             logger.warning(f"【CloudStrmKit】列举 115 目录失败：{pan_dir}：{err}")
             return None
-        return list(items or [])
+        result = list(items or [])
+        self._dir_cache[pan_dir] = result
+        return result
 
     def _download(self, pickcode: str, target: Path) -> bool:
         """

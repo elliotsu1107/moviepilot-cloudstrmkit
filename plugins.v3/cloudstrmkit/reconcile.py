@@ -130,12 +130,14 @@ class Reconciler:
             raw = raw.rsplit(".", 1)[-1]
         return raw.strip().lower()
 
-    def _walk(self, pan_dir: Path, results: List[Tuple[str, int]], depth: int = 0) -> bool:
+    def _walk(
+        self, pan_dir: Path, results: List[Tuple[str, int, str]], depth: int = 0
+    ) -> bool:
         """
-        递归遍历 115 目录，收集视频文件。
+        递归遍历 115 目录，收集视频文件（含 pickcode，避免补漏时二次查询）。
 
         :param pan_dir: 当前目录
-        :param results: 结果列表（append (path, size)）
+        :param results: 结果列表（append (path, size, pickcode)）
         :param depth: 当前深度
         :return: 是否成功列举（用于安全判断：列举失败时禁止清理孤儿）
         """
@@ -161,7 +163,8 @@ class Reconciler:
             size = int(getattr(item, "size", 0) or 0)
             if size < self._config.min_size_bytes:
                 continue
-            results.append((str(item_path), size))
+            pickcode = str(getattr(item, "pickcode", "") or "")
+            results.append((str(item_path), size, pickcode))
         return ok
 
     def _within_roots(self, pan_path: str) -> bool:
@@ -202,7 +205,7 @@ class Reconciler:
                 result.update(success=False, message="未配置 115 媒体库根路径（library_roots）")
                 return result
 
-            videos: List[Tuple[str, int]] = []
+            videos: List[Tuple[str, int, str]] = []
             root_status: List[Dict[str, Any]] = []
             scan_ok = False
             for root in roots:
@@ -212,17 +215,19 @@ class Reconciler:
                 scan_ok = scan_ok or ok
             result["scanned"] = len(videos)
             result["root_status"] = root_status
+            if self._attachments is not None:
+                self._attachments.clear_cache()
             logger.info(
                 f"【CloudStrmKit】对账开始：扫描到 {len(videos)} 个视频，"
                 f"根目录状态={root_status}"
             )
 
-            pan_paths = {path for path, _ in videos}
+            pan_paths = {path for path, _, _ in videos}
             refresh_dirs: List[Path] = []
             pickcode_cache: Dict[str, str] = {}
 
             # 1. 补漏生成
-            for pan_path, _size in videos:
+            for pan_path, _size, host_pickcode in videos:
                 if self._stop_if_needed():
                     break
                 local_path = self._mapper.map(pan_path)
@@ -233,7 +238,7 @@ class Reconciler:
                 if entry is not None and strm_path.exists():
                     continue
                 try:
-                    pickcode = pickcode_cache.get(pan_path)
+                    pickcode = host_pickcode or pickcode_cache.get(pan_path) or ""
                     if not pickcode:
                         pickcode = self._u115.get_pickcode(pan_path)
                         pickcode_cache[pan_path] = pickcode
