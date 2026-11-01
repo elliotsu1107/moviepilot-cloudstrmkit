@@ -20,6 +20,7 @@ from app.sdk.plugin import _PluginBase
 from fastapi import Request
 from fastapi.responses import Response
 
+from .attachments import AttachmentSyncer
 from .config import CloudStrmKitConfig
 from .diagnostics import DiagEventLog, extract_transfer_fields, probe_u115_download
 from .fnos import FnosRefresher
@@ -53,7 +54,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.2.2"
+    plugin_version = "0.3.0"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -74,6 +75,7 @@ class CloudStrmKit(_PluginBase):
     _u115: Optional[U115Client] = None
     _fnos: Optional[FnosRefresher] = None
     _play: Optional[PlayService] = None
+    _attachments: Optional[AttachmentSyncer] = None
     _queue: Optional["queue.Queue[Dict[str, Any]]"] = None
     _worker: Optional[threading.Thread] = None
     _stop_event: threading.Event = threading.Event()
@@ -100,6 +102,7 @@ class CloudStrmKit(_PluginBase):
         self._play = PlayService(
             self._index, self._builder, self._u115, debug=self._config.debug
         )
+        self._attachments = AttachmentSyncer(self._config, self._u115, self._index)
 
         self._queue = queue.Queue(maxsize=2000)
         self._stop_event = threading.Event()
@@ -443,6 +446,13 @@ class CloudStrmKit(_PluginBase):
             except Exception as err:  # noqa: BLE001 - 单个文件失败不影响其他文件
                 logger.error(f"【CloudStrmKit】生成 STRM 失败：{strm_path}：{err}")
                 continue
+
+            # 附属文件同步（NFO/海报/字幕；失败不阻断主流程）
+            if self._attachments is not None:
+                try:
+                    self._attachments.sync_for_video(pan_path, local_path, entry)
+                except Exception as err:  # noqa: BLE001
+                    logger.warning(f"【CloudStrmKit】附属文件同步失败：{pan_path}：{err}")
 
             # 飞牛刷新项：使用 STRM 所在影片目录的飞牛视角路径
             fnos_dir = PathMapper.to_fnos_path(
