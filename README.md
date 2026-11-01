@@ -188,6 +188,10 @@ volumes:
 | 飞牛不刷新 | 实例名错误 / 非管理员 | 检查 `fnos_instance` 与飞牛账号 |
 | 对账很慢 | 用了 `scan` 模式 | 改用 `history` 模式 |
 
+## 许可证
+
+本项目采用 [MIT License](LICENSE)。
+
 ## 文档
 
 | 文档 | 内容 |
