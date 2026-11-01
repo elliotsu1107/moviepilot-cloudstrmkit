@@ -3,6 +3,14 @@
 
 > 格式参考 Keep a Changelog；版本遵循 SemVer（v0.x 阶段）。
 
+## [v0.7.0] - 2026-11-01
+
+### 新增
+
+- 全量重写 STRM：`POST /rebuild` + `GET /rebuild/status`，修改 `base_url` 或签名密钥后一键重写全部 STRM。
+- `/play` 支持 `HEAD` 请求（部分播放器会用 HEAD 探测）。
+- 覆盖整理时先清理该视频旧的附属文件（NFO/海报/字幕），避免旧文件残留。
+
 ## [v0.6.3] - 2026-11-01
 
 ### 修复

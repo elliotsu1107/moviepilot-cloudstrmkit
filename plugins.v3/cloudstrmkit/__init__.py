@@ -60,7 +60,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.6.3"
+    plugin_version = "0.7.0"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -83,6 +83,8 @@ class CloudStrmKit(_PluginBase):
     _play: Optional[PlayService] = None
     _attachments: Optional[AttachmentSyncer] = None
     _reconciler: Optional[Reconciler] = None
+    _rebuilding: bool = False
+    _last_rebuild: Optional[Dict[str, Any]] = None
     _queue: Optional["queue.Queue[Dict[str, Any]]"] = None
     _worker: Optional[threading.Thread] = None
     _stop_event: threading.Event = threading.Event()
@@ -300,7 +302,7 @@ class CloudStrmKit(_PluginBase):
             {
                 "path": "/play",
                 "endpoint": self.api_play,
-                "methods": ["GET"],
+                "methods": ["GET", "HEAD"],
                 "allow_anonymous": True,
                 "summary": "302 播放",
                 "description": "校验签名后用请求方 UA 换取 115 直链并返回 302",
@@ -320,6 +322,22 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "手动对账",
                 "description": "后台执行一次 115 媒体库对账（补漏/清理孤儿）",
+            },
+            {
+                "path": "/rebuild",
+                "endpoint": self.api_rebuild,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "全量重写 STRM",
+                "description": "按当前 base_url 与签名密钥重写全部 STRM（修改对外地址后使用）",
+            },
+            {
+                "path": "/rebuild/status",
+                "endpoint": self.api_rebuild_status,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "全量重写状态",
+                "description": "返回全量重写运行状态与最近结果",
             },
             {
                 "path": "/reconcile/status",
@@ -551,6 +569,13 @@ class CloudStrmKit(_PluginBase):
                 logger.error(f"【CloudStrmKit】缺少 pickcode，跳过：{pan_path}")
                 continue
             try:
+                # 覆盖整理：先清理该视频旧的附属文件，避免旧 NFO/海报残留
+                existing_entry = self._index.get_by_pan_path(pan_path)
+                if existing_entry is not None and self._attachments is not None:
+                    try:
+                        self._attachments.cleanup_for_video(pan_path, local_path)
+                    except Exception as err:  # noqa: BLE001
+                        logger.warning(f"【CloudStrmKit】清理旧附属文件失败：{pan_path}：{err}")
                 entry = self._index.upsert(
                     IndexEntry(
                         id=StrmIndex.make_id(pan_path),
@@ -757,6 +782,64 @@ class CloudStrmKit(_PluginBase):
             return {"success": False, "message": "插件未初始化", "data": None}
         items = self._attachments.scan_orphans(self._config.strm_root_local)
         return {"success": True, "message": "", "data": {"items": items, "count": len(items)}}
+
+    # ------------------------------------------------------------------
+    # 全量重写
+    # ------------------------------------------------------------------
+    def api_rebuild(self) -> Dict[str, Any]:
+        """
+        全量重写所有 STRM（按当前 base_url 与密钥）。
+
+        :return: 统一响应结构
+        """
+        if self._index is None or self._builder is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        if self._rebuilding:
+            return {"success": False, "message": "全量重写正在进行中", "data": None}
+        threading.Thread(
+            target=self._rebuild_all,
+            name="CloudStrmKitRebuild",
+            daemon=True,
+        ).start()
+        return {"success": True, "message": "全量重写已开始（后台执行）", "data": None}
+
+    def _rebuild_all(self) -> None:
+        """遍历索引重写全部 STRM 文件。"""
+        if self._index is None or self._builder is None:
+            return
+        self._rebuilding = True
+        started = time.monotonic()
+        total = 0
+        failed = 0
+        try:
+            for entry in self._index.all_items():
+                try:
+                    write_strm(Path(entry.strm_path), self._builder.build_url(entry.id))
+                    total += 1
+                except Exception as err:  # noqa: BLE001 - 单个失败不影响整体
+                    failed += 1
+                    logger.error(f"【CloudStrmKit】重写 STRM 失败：{entry.strm_path}：{err}")
+            self._last_rebuild = {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "total": total,
+                "failed": failed,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            }
+            logger.info(f"【CloudStrmKit】全量重写完成：{total} 个，失败 {failed}")
+        finally:
+            self._rebuilding = False
+
+    def api_rebuild_status(self) -> Dict[str, Any]:
+        """
+        返回全量重写状态。
+
+        :return: 统一响应结构
+        """
+        return {
+            "success": True,
+            "message": "",
+            "data": {"running": self._rebuilding, "last": self._last_rebuild},
+        }
 
     def api_cleanup_orphans(self, paths: str = "") -> Dict[str, Any]:
         """
