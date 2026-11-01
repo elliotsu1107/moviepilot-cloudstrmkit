@@ -3,6 +3,18 @@
 
 > 格式参考 Keep a Changelog；版本遵循 SemVer（v0.x 阶段）。
 
+## [v0.1.1] - 2026-11-01
+
+### 新增
+
+- T2：配置模型 `CloudStrmKitConfig`、STRM 索引（JSON 原子持久化）、插件配置页、详情页统计。
+- T3：`TransferComplete` 事件载荷记录（`/diag/event-log`）、115 换链探针（`/diag/u115`，验证 UA 绑定假设）。
+- 容器内 STRM 根目录默认值改为 `/strm_test`（与旧目录隔离的测试策略）。
+
+### 说明
+
+- **开发期版本自增策略**：本地插件仓的更新依赖版本号变化，每次需要把开发代码更新到 MoviePilot 运行目录时，必须递增 `package.v3.json` 的 `version` 与插件 `plugin_version`，否则市场不会显示“更新”。
+
 ## [v0.1.0] - 2026-11-01
 
 ### 新增
