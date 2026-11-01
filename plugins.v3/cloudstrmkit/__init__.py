@@ -1,20 +1,32 @@
 """
 CloudStrmKit 插件入口。
 
-当前阶段（T2）：配置模型、索引持久化、配置页与详情页统计。
-后续任务：事件监听、STRM 生成、115 302、飞牛刷新、对账（见 docs/PLAN.md）。
+当前阶段（T3）：配置模型、索引持久化、整理事件载荷记录、115 换链诊断。
+后续任务：STRM 生成、115 302、飞牛刷新、对账（见 docs/PLAN.md）。
 """
 
+import json
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.schemas.types import EventType
+from app.sdk.events import eventmanager
 from app.sdk.logging import logger
 from app.sdk.plugin import _PluginBase
 
 from .config import CloudStrmKitConfig
+from .diagnostics import DiagEventLog, extract_transfer_fields, probe_u115_download
 from .index import StrmIndex
 
 # 插件标识（与 package.v3.json 的 key 一致）
 PLUGIN_ID = "CloudStrmKit"
+
+# 115 探针默认候选 UA（飞牛客户端 UA 待从播放日志确认后补充）
+DEFAULT_PROBE_USER_AGENTS = [
+    "",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+    "MoviePilot/CloudStrmKit",
+]
 
 
 class CloudStrmKit(_PluginBase):
@@ -45,6 +57,7 @@ class CloudStrmKit(_PluginBase):
     # 运行时状态
     _config: CloudStrmKitConfig = CloudStrmKitConfig()
     _index: Optional[StrmIndex] = None
+    _diag: Optional[DiagEventLog] = None
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -57,6 +70,7 @@ class CloudStrmKit(_PluginBase):
         """
         self._config = self._parse_config(config)
         self._index = StrmIndex(self.get_data_path())
+        self._diag = DiagEventLog(self.get_data_path())
         logger.info(
             f"【CloudStrmKit】插件初始化，enabled={self._config.enabled}，"
             f"索引条目={len(self._index)}，数据目录={self.get_data_path()}"
@@ -126,6 +140,30 @@ class CloudStrmKit(_PluginBase):
                 "summary": "索引统计",
                 "description": "返回 STRM 索引统计信息",
             },
+            {
+                "path": "/diag/event-log",
+                "endpoint": self.api_event_log,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "整理事件记录",
+                "description": "返回最近记录的 TransferComplete 事件载荷（T3 验证用）",
+            },
+            {
+                "path": "/diag/u115",
+                "endpoint": self.api_probe_u115,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "115 换链探针",
+                "description": "按 115 路径查 pickcode，用多个 UA 换链并探测直链状态（T3 验证用）",
+            },
+            {
+                "path": "/diag/clear-events",
+                "endpoint": self.api_clear_events,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "清空事件记录",
+                "description": "清空 T3 诊断事件记录",
+            },
         ]
 
     def ping(self) -> Dict[str, Any]:
@@ -153,6 +191,66 @@ class CloudStrmKit(_PluginBase):
         """
         stats = self._index.stats() if self._index else {}
         return {"success": True, "message": "", "data": stats}
+
+    # ------------------------------------------------------------------
+    # 诊断（T3 真机验证）
+    # ------------------------------------------------------------------
+    @eventmanager.register(EventType.TransferComplete)
+    async def on_transfer_complete(self, event: Any) -> None:
+        """
+        记录整理完成事件载荷（用于确认 target_item/storage/pickcode 可用性）。
+
+        :param event: 事件对象
+        """
+        try:
+            fields = extract_transfer_fields(event.event_data)
+            if self._diag is not None:
+                self._diag.record(fields)
+            logger.info(
+                f"【CloudStrmKit】整理完成事件："
+                f"{json.dumps(fields, ensure_ascii=False)[:1000]}"
+            )
+        except Exception as err:  # noqa: BLE001 - 事件处理异常不能外抛
+            logger.error(f"【CloudStrmKit】处理整理完成事件失败：{err}")
+
+    def api_event_log(self, limit: int = 20) -> Dict[str, Any]:
+        """
+        返回最近记录的整理完成事件载荷。
+
+        :param limit: 最大条数
+        :return: 统一响应结构
+        """
+        items = self._diag.recent(limit) if self._diag else []
+        return {"success": True, "message": "", "data": {"items": items}}
+
+    def api_clear_events(self) -> Dict[str, Any]:
+        """
+        清空整理完成事件记录。
+
+        :return: 统一响应结构
+        """
+        if self._diag is not None:
+            self._diag.clear()
+        return {"success": True, "message": "已清空", "data": None}
+
+    def api_probe_u115(self, path: str = "", uas: str = "") -> Dict[str, Any]:
+        """
+        115 换链探针：按路径查 pickcode，用多个 UA 换链并探测直链可访问性。
+
+        :param path: 115 文件完整路径
+        :param uas: 逗号分隔的 UA 列表；为空时使用内置候选
+        :return: 统一响应结构
+        """
+        if not path or not path.strip():
+            return {"success": False, "message": "缺少 path 参数（115 文件完整路径）", "data": None}
+        agents = [item.strip() for item in uas.split(",")] if uas else list(DEFAULT_PROBE_USER_AGENTS)
+        result = probe_u115_download(path.strip(), agents)
+        ok = bool(result.get("ok"))
+        return {
+            "success": ok,
+            "message": "" if ok else str(result.get("error") or "探针失败"),
+            "data": result,
+        }
 
     # ------------------------------------------------------------------
     # 配置页
