@@ -68,6 +68,9 @@ class CloudStrmKitConfig(BaseModel):
     delete_sync: bool = Field(default=True, description="115 删除后同步删除本地文件")
     debug: bool = Field(default=False, description="调试日志")
 
+    # 通知
+    notify_enabled: bool = Field(default=True, description="启用通知（对账完成/播放失败）")
+
     @field_validator("base_url")
     @classmethod
     def _normalize_base_url(cls, value: str) -> str:

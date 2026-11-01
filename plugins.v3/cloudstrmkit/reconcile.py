@@ -46,6 +46,7 @@ class Reconciler:
         index: StrmIndex,
         attachments: Optional[AttachmentSyncer] = None,
         fnos: Optional[FnosRefresher] = None,
+        notifier: Optional[Any] = None,
     ) -> None:
         """
         初始化对账器。
@@ -57,6 +58,7 @@ class Reconciler:
         :param index: STRM 索引
         :param attachments: 附属文件同步器（可选）
         :param fnos: 飞牛刷新器（可选）
+        :param notifier: 通知器（可选）
         """
         self._config = config
         self._mapper = mapper
@@ -65,6 +67,7 @@ class Reconciler:
         self._index = index
         self._attachments = attachments
         self._fnos = fnos
+        self._notifier = notifier
         self._lock = threading.Lock()
         self._running = False
         self._last_run: Optional[Dict[str, Any]] = None
@@ -329,12 +332,18 @@ class Reconciler:
             "library_roots": self._config.library_roots,
         }
 
-    def run(self) -> Dict[str, Any]:
+    def run(self, paths: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         执行一次对账（同步阻塞，调用方负责放到后台线程）。
 
+        :param paths: 可选，仅处理这些 115 路径前缀下的文件（精准修复单个目录）
         :return: 对账结果
         """
+        scope = [
+            item.strip().replace("\\", "/").rstrip("/")
+            for item in (paths or [])
+            if item and item.strip()
+        ]
         with self._lock:
             if self._running:
                 return {"success": False, "message": "对账正在进行中", "data": self._last_run or {}}
@@ -343,6 +352,7 @@ class Reconciler:
         result: Dict[str, Any] = {
             "success": True,
             "mode": self._config.reconcile_mode,
+            "scope": scope,
             "generated": 0,
             "removed": 0,
             "scanned": 0,
@@ -363,6 +373,16 @@ class Reconciler:
                 videos = history
             else:
                 videos, scan_ok = self._scan_library()
+
+            if scope:
+                videos = [
+                    item
+                    for item in videos
+                    if any(
+                        item[0] == prefix or item[0].startswith(prefix + "/")
+                        for prefix in scope
+                    )
+                ]
 
             if not videos and not scan_ok:
                 result.update(
@@ -469,6 +489,17 @@ class Reconciler:
                 f"补漏 {result['generated']}，清理 {result['removed']}，"
                 f"失败 {result['failed']}，刷新 {result['refreshed']}"
             )
+            if self._notifier is not None and (
+                result["generated"] or result["removed"] or result["failed"]
+            ):
+                self._notifier.send(
+                    "CloudStrmKit 对账完成",
+                    f"模式 {result['mode']}，扫描 {result['scanned']}，"
+                    f"补漏 {result['generated']}，清理 {result['removed']}，"
+                    f"失败 {result['failed']}",
+                    dedupe_key="reconcile",
+                    cooldown=3600,
+                )
             return result
         finally:
             with self._lock:

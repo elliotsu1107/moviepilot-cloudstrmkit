@@ -35,6 +35,7 @@ class PlayService:
         builder: StrmContentBuilder,
         u115: U115Client,
         debug: bool = False,
+        notifier: Optional[Any] = None,
     ) -> None:
         """
         初始化播放服务。
@@ -43,11 +44,13 @@ class PlayService:
         :param builder: STRM 内容构建器（验签用）
         :param u115: 115 客户端
         :param debug: 是否输出调试日志
+        :param notifier: 通知器（播放失败告警）
         """
         self._index = index
         self._builder = builder
         self._u115 = u115
         self._debug = debug
+        self._notifier = notifier
         self._logs: "deque[Dict[str, Any]]" = deque(maxlen=PLAY_LOG_LIMIT)
 
     def handle(self, request: Request, entry_id: str, expires_at: int, signature: str) -> Response:
@@ -176,6 +179,13 @@ class PlayService:
         if retry_after:
             headers["Retry-After"] = str(retry_after)
         body = json.dumps({"success": False, "message": message}, ensure_ascii=False)
+        if status in (502, 503) and self._notifier is not None:
+            self._notifier.send(
+                "CloudStrmKit 播放失败",
+                f"播放请求失败（{status}）：{message}",
+                dedupe_key=f"play_fail_{status}",
+                cooldown=600,
+            )
         return Response(status_code=status, content=body, headers=headers)
 
     def _record(self, item: Dict[str, Any]) -> None:

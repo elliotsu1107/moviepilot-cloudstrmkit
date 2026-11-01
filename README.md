@@ -153,14 +153,19 @@ volumes:
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| `/play?f=&e=&sig=` | 签名 | 302 播放 |
+| `/play?f=&e=&sig=` | 签名 | 302 播放（GET/HEAD） |
 | `/play/logs` | bear | 播放日志 |
-| `/reconcile` | bear | 手动触发对账（后台） |
+| `/reconcile` | bear | 手动触发对账（`?paths=` 可按 115 路径前缀精准执行） |
 | `/reconcile/status` | bear | 对账状态与结果 |
+| `/rebuild` | bear | 全量重写 STRM（改 `base_url`/密钥后使用） |
+| `/rebuild/status` | bear | 全量重写状态 |
+| `/attachments/orphans` | bear | 扫描孤儿附属文件（只读） |
+| `/attachments/cleanup?paths=` | bear | 确认清理孤儿附属文件 |
 | `/diag/event-log` | bear | 最近整理事件载荷 |
 | `/diag/u115` | bear | 115 换链探针（UA 绑定验证） |
 | `/diag/u115-list` | bear | 115 目录列举诊断 |
 | `/diag/reconcile-source` | bear | 对账数据源诊断 |
+| `/diag/notify-test` | bear | 通知服务测试 |
 | `/diag/clear-events` | bear | 清空事件记录 |
 
 ### 已知限制

@@ -30,6 +30,7 @@ from .diagnostics import (
 )
 from .fnos import FnosRefresher
 from .index import IndexEntry, StrmIndex
+from .notifier import Notifier
 from .redirect import PlayService
 from .reconcile import Reconciler
 from .strm import PathMapper, StrmContentBuilder, remove_strm, write_strm
@@ -60,7 +61,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.7.0"
+    plugin_version = "0.9.0"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -85,6 +86,7 @@ class CloudStrmKit(_PluginBase):
     _reconciler: Optional[Reconciler] = None
     _rebuilding: bool = False
     _last_rebuild: Optional[Dict[str, Any]] = None
+    _notifier: Optional[Notifier] = None
     _queue: Optional["queue.Queue[Dict[str, Any]]"] = None
     _worker: Optional[threading.Thread] = None
     _stop_event: threading.Event = threading.Event()
@@ -107,9 +109,14 @@ class CloudStrmKit(_PluginBase):
         self._mapper = PathMapper(self._config.path_mappings)
         self._builder = StrmContentBuilder(self._config.base_url, secret, PLUGIN_ID)
         self._u115 = U115Client(cache_ttl=self._config.cache_ttl, qps=self._config.qps)
+        self._notifier = Notifier(self._config.notify_enabled)
         self._fnos = FnosRefresher(self._config.fnos_instance)
         self._play = PlayService(
-            self._index, self._builder, self._u115, debug=self._config.debug
+            self._index,
+            self._builder,
+            self._u115,
+            debug=self._config.debug,
+            notifier=self._notifier,
         )
         self._attachments = AttachmentSyncer(self._config, self._u115, self._index)
         self._reconciler = Reconciler(
@@ -120,6 +127,7 @@ class CloudStrmKit(_PluginBase):
             self._index,
             self._attachments,
             self._fnos,
+            notifier=self._notifier,
         )
 
         self._queue = queue.Queue(maxsize=2000)
@@ -290,6 +298,14 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "对账数据源诊断",
                 "description": "检查整理历史可读性与目标数量（不生成文件）",
+            },
+            {
+                "path": "/diag/notify-test",
+                "endpoint": self.api_notify_test,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "通知测试",
+                "description": "发送一条测试通知，验证通知服务是否可用",
             },
             {
                 "path": "/diag/clear-events",
@@ -639,6 +655,14 @@ class CloudStrmKit(_PluginBase):
         logger.info(
             f"【CloudStrmKit】生成完成：{generated} 个 STRM，刷新项 {len(refresh_items)} 个"
         )
+        failed_count = len(task.get("files") or []) - generated
+        if failed_count > 0 and self._notifier is not None:
+            self._notifier.send(
+                "CloudStrmKit 生成异常",
+                f"本次整理有 {failed_count} 个文件未生成 STRM，请查看插件日志。",
+                dedupe_key="transfer_fail",
+                cooldown=600,
+            )
 
     def api_event_log(self, limit: int = 20) -> Dict[str, Any]:
         """
@@ -736,22 +760,29 @@ class CloudStrmKit(_PluginBase):
     # ------------------------------------------------------------------
     # 对账
     # ------------------------------------------------------------------
-    def api_reconcile(self) -> Dict[str, Any]:
+    def api_reconcile(self, paths: str = "") -> Dict[str, Any]:
         """
         手动触发一次对账（后台执行）。
 
+        :param paths: 可选，逗号分隔的 115 路径前缀（仅处理这些范围）
         :return: 统一响应结构
         """
         if self._reconciler is None:
             return {"success": False, "message": "插件未初始化", "data": None}
         if self._reconciler.running:
             return {"success": False, "message": "对账正在进行中", "data": None}
+        scope = [item.strip() for item in (paths or "").split(",") if item.strip()]
         threading.Thread(
             target=self._reconciler.run,
+            args=(scope,),
             name="CloudStrmKitReconcileManual",
             daemon=True,
         ).start()
-        return {"success": True, "message": "对账已开始（后台执行）", "data": None}
+        return {
+            "success": True,
+            "message": "对账已开始（后台执行）",
+            "data": {"scope": scope},
+        }
 
     def api_reconcile_status(self) -> Dict[str, Any]:
         """
@@ -859,6 +890,42 @@ class CloudStrmKit(_PluginBase):
             }
         result = self._attachments.cleanup_orphans(self._config.strm_root_local, files)
         return {"success": True, "message": "", "data": result}
+
+    def api_notify_test(self) -> Dict[str, Any]:
+        """
+        发送一条测试通知，并返回通知服务诊断信息。
+
+        :return: 统一响应结构
+        """
+        if self._notifier is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        detail: Dict[str, Any] = {"enabled": self._notifier.enabled}
+        try:
+            from app.sdk.services import NotificationHelper
+
+            services = NotificationHelper().get_services()
+            detail["services"] = {
+                name: str(getattr(service, "type", "") or "")
+                for name, service in services.items()
+            }
+            detail["count"] = len(services)
+        except Exception as err:  # noqa: BLE001
+            detail["probe_error"] = f"{err}"
+        ok = self._notifier.send("CloudStrmKit 测试", "这是一条来自 CloudStrmKit 的测试通知")
+        detail["sent"] = ok
+        if not ok:
+            detail["error"] = self._notifier.last_error
+        if not ok and detail.get("count", 0) == 0:
+            return {
+                "success": False,
+                "message": "MoviePilot 未配置通知服务，请先在系统设置中配置通知渠道",
+                "data": detail,
+            }
+        return {
+            "success": ok,
+            "message": "" if ok else "发送失败（详见插件日志）",
+            "data": detail,
+        }
 
     # ------------------------------------------------------------------
     # 配置页
@@ -1203,6 +1270,19 @@ class CloudStrmKit(_PluginBase):
                                     {
                                         "component": "VSwitch",
                                         "props": {
+                                            "model": "notify_enabled",
+                                            "label": "启用通知（对账完成/播放失败）",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
                                             "model": "reconcile_sync_attachments",
                                             "label": "对账时同步附属文件（首次全量建议关闭）",
                                         },
@@ -1250,7 +1330,7 @@ class CloudStrmKit(_PluginBase):
     # ------------------------------------------------------------------
     def get_page(self) -> Optional[List[dict]]:
         """
-        拼装插件详情页（索引统计）。
+        拼装插件详情页（统计、对账状态、播放日志、最近生成与操作提示）。
 
         :return: Vuetify 组件树
         """
@@ -1258,9 +1338,73 @@ class CloudStrmKit(_PluginBase):
         cards = [
             ("索引条目", stats.get("total", 0)),
             ("附属文件", stats.get("attachments", 0)),
-            ("目录级附属文件", stats.get("dir_attachments", 0)),
             ("缺失 pickcode", stats.get("missing_pickcode", 0)),
+            ("对账模式", self._config.reconcile_mode),
         ]
+
+        last_run = self._reconciler.last_run if self._reconciler is not None else None
+        if last_run:
+            reconcile_text = (
+                f"模式 {last_run.get('mode', '-')}｜扫描 {last_run.get('scanned', 0)}"
+                f"｜补漏 {last_run.get('generated', 0)}｜清理 {last_run.get('removed', 0)}"
+                f"｜失败 {last_run.get('failed', 0)}"
+                f"｜耗时 {last_run.get('elapsed_ms', 0)}ms"
+            )
+        else:
+            reconcile_text = "尚未执行（定时任务：{}）".format(self._config.reconcile_cron or "未配置")
+
+        play_items = self._play.recent_logs(10) if self._play is not None else []
+        play_lines = [
+            "{} · {} · {} · {}".format(
+                item.get("time", ""),
+                item.get("status", ""),
+                str(item.get("ua", ""))[:36],
+                str(item.get("pan_path", ""))[-56:],
+            )
+            for item in play_items
+        ] or ["暂无播放记录"]
+
+        recent_items = []
+        if self._index is not None:
+            recent_items = sorted(
+                self._index.all_items(), key=lambda item: item.created_at, reverse=True
+            )[:8]
+        recent_lines = [item.pan_path for item in recent_items] or ["暂无记录"]
+
+        sample_text = "暂无"
+        if self._builder is not None and recent_items:
+            try:
+                sample_text = self._builder.build_url(recent_items[0].id)
+            except Exception:  # noqa: BLE001
+                sample_text = "生成失败"
+
+        def text_card(title: str, lines: List[str]) -> dict:
+            """构造文本卡片。"""
+            return {
+                "component": "VCol",
+                "props": {"cols": 12, "md": 6},
+                "content": [
+                    {
+                        "component": "VCard",
+                        "props": {"variant": "tonal"},
+                        "content": [
+                            {
+                                "component": "VCardTitle",
+                                "props": {"class": "text-subtitle-2"},
+                                "text": title,
+                            },
+                            {
+                                "component": "VCardText",
+                                "props": {"class": "text-caption"},
+                                "content": [
+                                    {"component": "div", "text": line} for line in lines
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+
         return [
             {
                 "component": "VRow",
@@ -1299,6 +1443,20 @@ class CloudStrmKit(_PluginBase):
             {
                 "component": "VRow",
                 "content": [
+                    text_card("对账状态", [reconcile_text]),
+                    text_card("示例 STRM 内容", [sample_text]),
+                ],
+            },
+            {
+                "component": "VRow",
+                "content": [
+                    text_card("最近播放", play_lines),
+                    text_card("最近生成", recent_lines),
+                ],
+            },
+            {
+                "component": "VRow",
+                "content": [
                     {
                         "component": "VCol",
                         "props": {"cols": 12},
@@ -1306,9 +1464,12 @@ class CloudStrmKit(_PluginBase):
                             {
                                 "component": "VAlert",
                                 "props": {
-                                    "type": "secondary",
+                                    "type": "info",
                                     "variant": "tonal",
-                                    "text": f"索引文件：{stats.get('index_path', '未初始化')}",
+                                    "text": (
+                                        "操作接口：POST /reconcile（可带 ?paths=115路径前缀）、"
+                                        "POST /rebuild（全量重写）、GET /attachments/orphans（孤儿扫描）"
+                                    ),
                                 },
                             }
                         ],
