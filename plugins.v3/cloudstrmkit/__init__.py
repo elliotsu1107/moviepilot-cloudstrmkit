@@ -32,7 +32,7 @@ from .fnos import FnosRefresher
 from .index import IndexEntry, StrmIndex
 from .redirect import PlayService
 from .reconcile import Reconciler
-from .strm import PathMapper, StrmContentBuilder, write_strm
+from .strm import PathMapper, StrmContentBuilder, remove_strm, write_strm
 from .u115 import U115Client, U115Error
 
 # 插件标识（与 package.v3.json 的 key 一致）
@@ -60,7 +60,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.6.1"
+    plugin_version = "0.6.3"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -481,6 +481,32 @@ class CloudStrmKit(_PluginBase):
         }
         return mapping.get(normalized)
 
+    def _cleanup_renamed_entries(self, pan_path: str) -> List[Path]:
+        """
+        删除同一文件名但路径不同的旧索引条目及其 STRM（覆盖整理/改名/改分类场景）。
+
+        :param pan_path: 新文件路径
+        :return: 被清理的旧 STRM 所在目录列表（用于飞牛刷新）
+        """
+        if self._index is None:
+            return []
+        new_name = Path(pan_path).name
+        removed_dirs: List[Path] = []
+        for entry in self._index.all_items():
+            if entry.pan_path == pan_path:
+                continue
+            if Path(entry.pan_path).name != new_name:
+                continue
+            old_path = Path(entry.strm_path)
+            remove_strm(old_path)
+            if self._index.remove(entry.id) is not None:
+                removed_dirs.append(old_path.parent)
+        if removed_dirs:
+            logger.info(
+                f"【CloudStrmKit】清理同名旧 STRM {len(removed_dirs)} 个：{new_name}"
+            )
+        return removed_dirs
+
     def _worker_loop(self) -> None:
         """后台任务循环：串行处理生成任务。"""
         assert self._queue is not None
@@ -541,6 +567,20 @@ class CloudStrmKit(_PluginBase):
             except Exception as err:  # noqa: BLE001 - 单个文件失败不影响其他文件
                 logger.error(f"【CloudStrmKit】生成 STRM 失败：{strm_path}：{err}")
                 continue
+
+            # 清理同名旧 STRM（覆盖整理/改名/改分类场景）
+            old_dirs = self._cleanup_renamed_entries(pan_path)
+            for old_dir in old_dirs:
+                fnos_old = PathMapper.to_fnos_path(
+                    old_dir,
+                    self._config.strm_root_local,
+                    self._config.strm_root_fnos,
+                )
+                if fnos_old is None or self._fnos is None:
+                    continue
+                item_old = self._fnos.build_item(None, None, None, None, fnos_old)
+                if item_old is not None:
+                    refresh_items.append(item_old)
 
             # 附属文件同步（NFO/海报/字幕；失败不阻断主流程）
             if self._attachments is not None:

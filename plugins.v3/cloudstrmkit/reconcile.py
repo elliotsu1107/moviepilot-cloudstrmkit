@@ -150,6 +150,25 @@ class Reconciler:
                 return True
         return False
 
+    def _cleanup_renamed(self, pan_path: str) -> int:
+        """
+        删除同一文件名但路径不同的旧索引条目及其 STRM（改名/改分类场景）。
+
+        :param pan_path: 新文件路径
+        :return: 清理数量
+        """
+        new_name = Path(pan_path).name
+        removed = 0
+        for entry in self._index.all_items():
+            if entry.pan_path == pan_path:
+                continue
+            if Path(entry.pan_path).name != new_name:
+                continue
+            remove_strm(Path(entry.strm_path))
+            if self._index.remove(entry.id) is not None:
+                removed += 1
+        return removed
+
     # ------------------------------------------------------------------
     # 数据源一：115 全库扫描
     # ------------------------------------------------------------------
@@ -370,6 +389,8 @@ class Reconciler:
                 strm_path = local_path.with_suffix(".strm")
                 entry = self._index.get_by_pan_path(pan_path)
                 if entry is not None and strm_path.exists():
+                    # 已存在时仍清理同名旧路径条目（改名/改分类残留）
+                    self._cleanup_renamed(pan_path)
                     continue
                 try:
                     # pickcode 缺失时不在对账阶段补查（否则数千次 115 请求极慢），
@@ -383,6 +404,7 @@ class Reconciler:
                         strm_path=str(strm_path),
                     )
                     write_strm(strm_path, self._builder.build_url(entry.id))
+                    self._cleanup_renamed(pan_path)
                     new_entries.append(entry)
                     result["generated"] += 1
                     refresh_dirs.append(strm_path.parent)
