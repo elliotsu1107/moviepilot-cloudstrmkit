@@ -62,6 +62,9 @@ class CloudStrmKitConfig(BaseModel):
         default="history",
         description="对账模式：history 基于整理历史（快）/ scan 扫描 115 全库（慢）",
     )
+    scan_cron: str = Field(
+        default="", description="定期一致性扫描 Cron（scan 模式，留空关闭）"
+    )
     reconcile_sync_attachments: bool = Field(
         default=False, description="对账时同步附属文件（首次全量建议关闭）"
     )

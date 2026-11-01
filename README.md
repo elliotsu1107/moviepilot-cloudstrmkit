@@ -141,6 +141,15 @@ volumes:
 | `path_mappings` | 115 前缀 → 容器内根，每行一条 | `/movie => /strm/movie` |
 | `library_roots` | 对账用的 115 媒体库根路径 | `/movie/电影`、`/tv/电视剧` |
 
+### 对账策略（推荐）
+
+| 任务 | 配置 | 作用 |
+|---|---|---|
+| 日常对账 | `reconcile_mode=history` + `reconcile_cron`（如 `30 4 * * *`） | 秒级补漏（基于整理历史） |
+| 定期一致性扫描 | `scan_cron`（如 `30 3 * * 0` 每周日） | 全量扫描 115：补漏 + 清理 115 已删除的 STRM（带三重保护） |
+
+> `scan` 全量遍历较慢且请求量大，建议只在低峰期定期执行；批量删除会挂起等人工确认（`GET /delete/pending`）。
+
 ### 处理流程
 
 1. MoviePilot 整理完成 → `TransferComplete` 事件

@@ -460,13 +460,17 @@ class Reconciler:
             "library_roots": self._config.library_roots,
         }
 
-    def run(self, paths: Optional[List[str]] = None) -> Dict[str, Any]:
+    def run(self, paths: Optional[List[str]] = None, mode: Optional[str] = None) -> Dict[str, Any]:
         """
         执行一次对账（同步阻塞，调用方负责放到后台线程）。
 
         :param paths: 可选，仅处理这些 115 路径前缀下的文件（精准修复单个目录）
+        :param mode: 可选，覆盖配置的对账模式（history/scan）
         :return: 对账结果
         """
+        effective_mode = (mode or self._config.reconcile_mode or "history").strip().lower()
+        if effective_mode not in {"history", "scan"}:
+            effective_mode = "history"
         scope = [
             item.strip().replace("\\", "/").rstrip("/")
             for item in (paths or [])
@@ -479,7 +483,7 @@ class Reconciler:
         started = time.monotonic()
         result: Dict[str, Any] = {
             "success": True,
-            "mode": self._config.reconcile_mode,
+            "mode": effective_mode,
             "scope": scope,
             "generated": 0,
             "removed": 0,
@@ -490,7 +494,7 @@ class Reconciler:
         try:
             videos: List[Tuple[str, int, str]] = []
             scan_ok = False
-            if self._config.reconcile_mode == "history":
+            if effective_mode == "history":
                 history = self._history_targets()
                 if history is None:
                     result.update(
@@ -575,7 +579,7 @@ class Reconciler:
             # 2. 清理孤儿（仅全库扫描模式、扫描成功且有结果时执行；带批量保护）
             if (
                 self._config.delete_sync
-                and self._config.reconcile_mode == "scan"
+                and effective_mode == "scan"
                 and scan_ok
                 and result["scanned"] > 0
             ):

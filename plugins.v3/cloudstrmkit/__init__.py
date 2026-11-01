@@ -61,7 +61,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.0"
+    plugin_version = "0.10.1"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -215,29 +215,51 @@ class CloudStrmKit(_PluginBase):
     # ------------------------------------------------------------------
     def get_service(self) -> Optional[List[Dict[str, Any]]]:
         """
-        注册定时对账服务。
+        注册定时服务：日常对账 + 可选定期一致性扫描。
 
         :return: 服务声明列表
         """
-        if not (self._config.reconcile_cron or "").strip():
-            return None
-        return [
-            {
-                "id": "CloudStrmKitReconcile",
-                "name": "STRM 对账",
-                "trigger": self._config.reconcile_cron.strip(),
-                "func": self._run_reconcile_job,
-                "kwargs": {},
-            }
-        ]
+        services: List[Dict[str, Any]] = []
+        if (self._config.reconcile_cron or "").strip():
+            services.append(
+                {
+                    "id": "CloudStrmKitReconcile",
+                    "name": "STRM 对账",
+                    "trigger": self._config.reconcile_cron.strip(),
+                    "func": self._run_reconcile_job,
+                    "kwargs": {},
+                }
+            )
+        if (self._config.scan_cron or "").strip():
+            services.append(
+                {
+                    "id": "CloudStrmKitScan",
+                    "name": "STRM 一致性扫描",
+                    "trigger": self._config.scan_cron.strip(),
+                    "func": self._run_scan_job,
+                    "kwargs": {},
+                }
+            )
+        return services or None
 
     def _run_reconcile_job(self) -> None:
-        """定时任务入口：后台线程执行对账，避免阻塞调度器。"""
+        """定时任务入口：按配置模式后台执行对账。"""
         if self._reconciler is None or not self._config.enabled:
             return
         threading.Thread(
             target=self._reconciler.run,
             name="CloudStrmKitReconcile",
+            daemon=True,
+        ).start()
+
+    def _run_scan_job(self) -> None:
+        """定期一致性扫描入口：强制 scan 模式后台执行。"""
+        if self._reconciler is None or not self._config.enabled:
+            return
+        threading.Thread(
+            target=self._reconciler.run,
+            kwargs={"mode": "scan"},
+            name="CloudStrmKitScan",
             daemon=True,
         ).start()
 
@@ -1359,8 +1381,22 @@ class CloudStrmKit(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "reconcile_cron",
-                                            "label": "对账 Cron",
+                                            "label": "日常对账 Cron",
                                             "placeholder": "30 4 * * *",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "scan_cron",
+                                            "label": "定期一致性扫描 Cron（scan，留空关闭）",
+                                            "placeholder": "30 3 * * 0（每周日）",
                                         },
                                     }
                                 ],
