@@ -254,7 +254,7 @@ class Reconciler:
                     write_strm(strm_path, self._builder.build_url(entry.id))
                     result["generated"] += 1
                     refresh_dirs.append(strm_path.parent)
-                    if self._attachments is not None:
+                    if self._attachments is not None and self._config.reconcile_sync_attachments:
                         try:
                             self._attachments.sync_for_video(pan_path, local_path, entry)
                         except Exception as err:  # noqa: BLE001

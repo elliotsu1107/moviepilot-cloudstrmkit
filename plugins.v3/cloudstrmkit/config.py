@@ -58,6 +58,9 @@ class CloudStrmKitConfig(BaseModel):
 
     # 对账与同步
     reconcile_cron: str = Field(default="30 4 * * *", description="对账 Cron 表达式")
+    reconcile_sync_attachments: bool = Field(
+        default=False, description="对账时同步附属文件（首次全量建议关闭）"
+    )
     delete_sync: bool = Field(default=True, description="115 删除后同步删除本地文件")
     debug: bool = Field(default=False, description="调试日志")
 

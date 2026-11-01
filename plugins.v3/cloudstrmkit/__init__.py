@@ -60,7 +60,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.4.3"
+    plugin_version = "0.4.4"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -987,6 +987,19 @@ class CloudStrmKit(_PluginBase):
                                         "props": {
                                             "model": "delete_sync",
                                             "label": "115 删除后同步删除本地文件",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "reconcile_sync_attachments",
+                                            "label": "对账时同步附属文件（首次全量建议关闭）",
                                         },
                                     }
                                 ],
