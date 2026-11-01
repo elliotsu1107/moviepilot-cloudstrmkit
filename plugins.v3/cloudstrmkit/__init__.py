@@ -53,7 +53,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.2.0"
+    plugin_version = "0.2.1"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -262,7 +262,7 @@ class CloudStrmKit(_PluginBase):
                 "plugin": PLUGIN_ID,
                 "version": self.plugin_version,
                 "enabled": self._config.enabled,
-                "items": len(self._index) if self._index else 0,
+                "items": len(self._index) if self._index is not None else 0,
             },
         }
 
@@ -272,7 +272,7 @@ class CloudStrmKit(_PluginBase):
 
         :return: 统一响应结构
         """
-        stats = self._index.stats() if self._index else {}
+        stats = self._index.stats() if self._index is not None else {}
         return {"success": True, "message": "", "data": stats}
 
     # ------------------------------------------------------------------
@@ -885,7 +885,7 @@ class CloudStrmKit(_PluginBase):
 
         :return: Vuetify 组件树
         """
-        stats = self._index.stats() if self._index else {}
+        stats = self._index.stats() if self._index is not None else {}
         cards = [
             ("索引条目", stats.get("total", 0)),
             ("附属文件", stats.get("attachments", 0)),

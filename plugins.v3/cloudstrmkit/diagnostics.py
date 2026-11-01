@@ -84,50 +84,67 @@ class DiagEventLog:
         self._save()
 
 
+def _get_field(obj: Any, key: str) -> Any:
+    """
+    兼容 dict 与对象两种事件载荷形态的字段读取。
+
+    :param obj: 载荷对象或字典
+    :param key: 字段名
+    :return: 字段值
+    """
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
+
+
 def extract_transfer_fields(event_data: Any) -> Dict[str, Any]:
     """
-    从 TransferComplete 事件载荷中提取关键字段（只做只读访问，字段缺失不报错）。
+    从 TransferComplete 事件载荷中提取关键字段（兼容 dict 与对象两种形态）。
 
-    :param event_data: 事件载荷对象
+    :param event_data: 事件载荷
     :return: 关键字段字典
     """
-    result: Dict[str, Any] = {}
-    transferinfo = getattr(event_data, "transferinfo", None)
+    result: Dict[str, Any] = {"payload_type": type(event_data).__name__}
+    if isinstance(event_data, dict):
+        result["payload_keys"] = list(event_data.keys())[:20]
+    transferinfo = _get_field(event_data, "transferinfo")
     if transferinfo is not None:
-        result["success"] = bool(getattr(transferinfo, "success", False))
-        result["transfer_type"] = getattr(transferinfo, "transfer_type", None)
-        result["target_storage"] = _safe_str(getattr(transferinfo, "target_storage", None))
-        result["file_list_new"] = list(getattr(transferinfo, "file_list_new", None) or [])[:20]
-        result["file_count"] = getattr(transferinfo, "file_count", None)
-        target_item = getattr(transferinfo, "target_item", None)
-        target_diritem = getattr(transferinfo, "target_diritem", None)
-        for key, item in (("target_item", target_item), ("target_diritem", target_diritem)):
+        result["success"] = bool(_get_field(transferinfo, "success"))
+        result["transfer_type"] = _get_field(transferinfo, "transfer_type")
+        result["target_storage"] = _safe_str(_get_field(transferinfo, "target_storage"))
+        file_list_new = _get_field(transferinfo, "file_list_new")
+        result["file_list_new"] = list(file_list_new or [])[:20]
+        result["file_count"] = _get_field(transferinfo, "file_count")
+        for key in ("target_item", "target_diritem"):
+            item = _get_field(transferinfo, key)
             if item is None:
                 result[key] = None
                 continue
             result[key] = {
-                "storage": _safe_str(getattr(item, "storage", None)),
-                "path": _safe_str(getattr(item, "path", None)),
-                "name": _safe_str(getattr(item, "name", None)),
-                "size": getattr(item, "size", None),
-                "pickcode": _safe_str(getattr(item, "pickcode", None)),
-                "type": _safe_str(getattr(item, "type", None)),
+                "storage": _safe_str(_get_field(item, "storage")),
+                "path": _safe_str(_get_field(item, "path")),
+                "name": _safe_str(_get_field(item, "name")),
+                "size": _get_field(item, "size"),
+                "pickcode": _safe_str(_get_field(item, "pickcode")),
+                "type": _safe_str(_get_field(item, "type")),
             }
     else:
         result["transferinfo"] = None
 
-    fileitem = getattr(event_data, "fileitem", None)
+    fileitem = _get_field(event_data, "fileitem")
     if fileitem is not None:
         result["source_item"] = {
-            "storage": _safe_str(getattr(fileitem, "storage", None)),
-            "path": _safe_str(getattr(fileitem, "path", None)),
+            "storage": _safe_str(_get_field(fileitem, "storage")),
+            "path": _safe_str(_get_field(fileitem, "path")),
         }
-    mediainfo = getattr(event_data, "mediainfo", None)
+    mediainfo = _get_field(event_data, "mediainfo")
     if mediainfo is not None:
         result["media"] = {
-            "title": _safe_str(getattr(mediainfo, "title", None)),
-            "year": _safe_str(getattr(mediainfo, "year", None)),
-            "type": _safe_str(getattr(mediainfo, "type", None)),
+            "title": _safe_str(_get_field(mediainfo, "title")),
+            "year": _safe_str(_get_field(mediainfo, "year")),
+            "type": _safe_str(_get_field(mediainfo, "type")),
         }
     return result
 
