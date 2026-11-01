@@ -340,3 +340,49 @@ def _probe_url(url: str, user_agent: str, proxy: Optional[str] = None) -> Any:
         return err.code
     except Exception as err:  # noqa: BLE001 - 网络错误直接回传给诊断结果
         return f"ERR:{err}"
+
+
+def probe_u115_list(pan_path: str) -> Dict[str, Any]:
+    """
+    诊断 115 目录列举：对比宿主 U115Pan.list 与目录自身查询结果。
+
+    :param pan_path: 115 目录路径
+    :return: 诊断结果
+    """
+    result: Dict[str, Any] = {"ok": False, "path": pan_path}
+    try:
+        from app.modules.filemanager.storages.u115 import U115Pan
+
+        pan = U115Pan()
+    except Exception as err:  # noqa: BLE001
+        result["error"] = f"初始化 115 存储失败：{err}"
+        return result
+
+    try:
+        folder = pan.get_item(Path(pan_path))
+        result["folder_found"] = folder is not None
+        items = list(pan.list(folder) or []) if folder is not None else []
+        result["host_list_count"] = len(items)
+        result["host_list_sample"] = [
+            {
+                "name": str(getattr(item, "name", "") or ""),
+                "type": str(getattr(item, "type", "") or ""),
+                "pickcode": str(getattr(item, "pickcode", "") or ""),
+            }
+            for item in items[:5]
+        ]
+    except Exception as err:  # noqa: BLE001
+        result["host_list_error"] = f"{err}"
+
+    try:
+        item = pan.get_item(Path(pan_path))
+        result["dir_item"] = {
+            "name": str(getattr(item, "name", "") or ""),
+            "pickcode": str(getattr(item, "pickcode", "") or ""),
+            "type": str(getattr(item, "type", "") or ""),
+        }
+    except Exception as err:  # noqa: BLE001
+        result["dir_item_error"] = f"{err}"
+
+    result["ok"] = "host_list_count" in result
+    return result

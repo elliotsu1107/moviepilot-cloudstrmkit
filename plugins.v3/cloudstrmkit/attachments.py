@@ -102,7 +102,11 @@ class AttachmentSyncer:
             from app.modules.filemanager.storages.u115 import U115Pan
 
             pan = U115Pan()
-            items = pan.list(Path(pan_dir))
+            folder = pan.get_item(Path(pan_dir))
+            if folder is None:
+                logger.warning(f"【CloudStrmKit】附属文件目录不存在：{pan_dir}")
+                return None
+            items = pan.list(folder)
         except Exception as err:  # noqa: BLE001 - 目录列举失败不阻断主流程
             logger.warning(f"【CloudStrmKit】列举 115 目录失败：{pan_dir}：{err}")
             return None

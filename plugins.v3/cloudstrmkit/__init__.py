@@ -22,10 +22,16 @@ from fastapi.responses import Response
 
 from .attachments import AttachmentSyncer
 from .config import CloudStrmKitConfig
-from .diagnostics import DiagEventLog, extract_transfer_fields, probe_u115_download
+from .diagnostics import (
+    DiagEventLog,
+    extract_transfer_fields,
+    probe_u115_download,
+    probe_u115_list,
+)
 from .fnos import FnosRefresher
 from .index import IndexEntry, StrmIndex
 from .redirect import PlayService
+from .reconcile import Reconciler
 from .strm import PathMapper, StrmContentBuilder, write_strm
 from .u115 import U115Client, U115Error
 
@@ -54,7 +60,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.3.0"
+    plugin_version = "0.4.2"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -76,6 +82,7 @@ class CloudStrmKit(_PluginBase):
     _fnos: Optional[FnosRefresher] = None
     _play: Optional[PlayService] = None
     _attachments: Optional[AttachmentSyncer] = None
+    _reconciler: Optional[Reconciler] = None
     _queue: Optional["queue.Queue[Dict[str, Any]]"] = None
     _worker: Optional[threading.Thread] = None
     _stop_event: threading.Event = threading.Event()
@@ -103,6 +110,15 @@ class CloudStrmKit(_PluginBase):
             self._index, self._builder, self._u115, debug=self._config.debug
         )
         self._attachments = AttachmentSyncer(self._config, self._u115, self._index)
+        self._reconciler = Reconciler(
+            self._config,
+            self._mapper,
+            self._builder,
+            self._u115,
+            self._index,
+            self._attachments,
+            self._fnos,
+        )
 
         self._queue = queue.Queue(maxsize=2000)
         self._stop_event = threading.Event()
@@ -185,6 +201,37 @@ class CloudStrmKit(_PluginBase):
             return CloudStrmKitConfig()
 
     # ------------------------------------------------------------------
+    # 定时服务
+    # ------------------------------------------------------------------
+    def get_service(self) -> Optional[List[Dict[str, Any]]]:
+        """
+        注册定时对账服务。
+
+        :return: 服务声明列表
+        """
+        if not (self._config.reconcile_cron or "").strip():
+            return None
+        return [
+            {
+                "id": "CloudStrmKitReconcile",
+                "name": "STRM 对账",
+                "trigger": self._config.reconcile_cron.strip(),
+                "func": self._run_reconcile_job,
+                "kwargs": {},
+            }
+        ]
+
+    def _run_reconcile_job(self) -> None:
+        """定时任务入口：后台线程执行对账，避免阻塞调度器。"""
+        if self._reconciler is None or not self._config.enabled:
+            return
+        threading.Thread(
+            target=self._reconciler.run,
+            name="CloudStrmKitReconcile",
+            daemon=True,
+        ).start()
+
+    # ------------------------------------------------------------------
     # API
     # ------------------------------------------------------------------
     def get_api(self) -> List[Dict[str, Any]]:
@@ -227,6 +274,14 @@ class CloudStrmKit(_PluginBase):
                 "description": "按 115 路径查 pickcode，用多个 UA 换链并探测直链状态（T3 验证用）",
             },
             {
+                "path": "/diag/u115-list",
+                "endpoint": self.api_probe_u115_list,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "115 目录列举诊断",
+                "description": "对比宿主 U115Pan.list 与目录查询结果，定位对账扫描失败原因",
+            },
+            {
                 "path": "/diag/clear-events",
                 "endpoint": self.api_clear_events,
                 "methods": ["POST"],
@@ -249,6 +304,22 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "播放日志",
                 "description": "返回最近的播放请求日志",
+            },
+            {
+                "path": "/reconcile",
+                "endpoint": self.api_reconcile,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "手动对账",
+                "description": "后台执行一次 115 媒体库对账（补漏/清理孤儿）",
+            },
+            {
+                "path": "/reconcile/status",
+                "endpoint": self.api_reconcile_status,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "对账状态",
+                "description": "返回对账运行状态与最近一次结果",
             },
         ]
 
@@ -519,6 +590,18 @@ class CloudStrmKit(_PluginBase):
             "data": result,
         }
 
+    def api_probe_u115_list(self, path: str = "") -> Dict[str, Any]:
+        """
+        115 目录列举诊断。
+
+        :param path: 115 目录路径
+        :return: 统一响应结构
+        """
+        if not path or not path.strip():
+            return {"success": False, "message": "缺少 path 参数（115 目录路径）", "data": None}
+        result = probe_u115_list(path.strip())
+        return {"success": bool(result.get("ok")), "message": "", "data": result}
+
     # ------------------------------------------------------------------
     # 播放（302）
     # ------------------------------------------------------------------
@@ -549,6 +632,45 @@ class CloudStrmKit(_PluginBase):
         """
         logs = self._play.recent_logs(limit) if self._play else []
         return {"success": True, "message": "", "data": {"items": logs}}
+
+    # ------------------------------------------------------------------
+    # 对账
+    # ------------------------------------------------------------------
+    def api_reconcile(self) -> Dict[str, Any]:
+        """
+        手动触发一次对账（后台执行）。
+
+        :return: 统一响应结构
+        """
+        if self._reconciler is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        if self._reconciler.running:
+            return {"success": False, "message": "对账正在进行中", "data": None}
+        threading.Thread(
+            target=self._reconciler.run,
+            name="CloudStrmKitReconcileManual",
+            daemon=True,
+        ).start()
+        return {"success": True, "message": "对账已开始（后台执行）", "data": None}
+
+    def api_reconcile_status(self) -> Dict[str, Any]:
+        """
+        返回对账运行状态与最近一次结果。
+
+        :return: 统一响应结构
+        """
+        if self._reconciler is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        return {
+            "success": True,
+            "message": "",
+            "data": {
+                "running": self._reconciler.running,
+                "last_run": self._reconciler.last_run,
+                "cron": self._config.reconcile_cron,
+                "library_roots": self._config.library_roots,
+            },
+        }
 
     # ------------------------------------------------------------------
     # 配置页
