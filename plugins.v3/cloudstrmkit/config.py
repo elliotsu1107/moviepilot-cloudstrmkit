@@ -58,6 +58,10 @@ class CloudStrmKitConfig(BaseModel):
 
     # 对账与同步
     reconcile_cron: str = Field(default="30 4 * * *", description="对账 Cron 表达式")
+    reconcile_mode: str = Field(
+        default="history",
+        description="对账模式：history 基于整理历史（快）/ scan 扫描 115 全库（慢）",
+    )
     reconcile_sync_attachments: bool = Field(
         default=False, description="对账时同步附属文件（首次全量建议关闭）"
     )
@@ -97,6 +101,18 @@ class CloudStrmKitConfig(BaseModel):
         """
         value = (value or "skip").strip().lower()
         return value if value in {"skip", "overwrite"} else "skip"
+
+    @field_validator("reconcile_mode")
+    @classmethod
+    def _validate_reconcile_mode(cls, value: str) -> str:
+        """
+        校验对账模式。
+
+        :param value: 原始配置值
+        :return: history 或 scan
+        """
+        value = (value or "history").strip().lower()
+        return value if value in {"history", "scan"} else "history"
 
     @property
     def video_ext_set(self) -> set[str]:

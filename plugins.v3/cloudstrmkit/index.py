@@ -287,6 +287,25 @@ class StrmIndex:
             self._save_locked()
             return entry
 
+    def add_many(self, entries: List[IndexEntry]) -> int:
+        """
+        批量写入索引条目（一次落盘，避免逐条保存）。
+
+        :param entries: 索引记录列表
+        :return: 写入条数
+        """
+        with self._lock:
+            now = time.time()
+            for entry in entries:
+                if not entry.id:
+                    entry.id = self.make_id(entry.pan_path)
+                if not entry.created_at:
+                    entry.created_at = now
+                self._items[entry.id] = entry
+            if entries:
+                self._save_locked()
+            return len(entries)
+
     def remove(self, entry_id: str) -> Optional[IndexEntry]:
         """
         按 ID 删除索引条目。

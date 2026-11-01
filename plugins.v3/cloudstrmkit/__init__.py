@@ -60,7 +60,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.4.4"
+    plugin_version = "0.5.1"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -974,6 +974,23 @@ class CloudStrmKit(_PluginBase):
                                             "model": "reconcile_cron",
                                             "label": "对账 Cron",
                                             "placeholder": "30 4 * * *",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSelect",
+                                        "props": {
+                                            "model": "reconcile_mode",
+                                            "label": "对账模式",
+                                            "items": [
+                                                {"title": "整理历史（快）", "value": "history"},
+                                                {"title": "扫描 115 全库（慢）", "value": "scan"},
+                                            ],
                                         },
                                     }
                                 ],

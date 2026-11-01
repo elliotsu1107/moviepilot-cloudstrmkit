@@ -1,11 +1,13 @@
 """
 定时对账与手动触发。
 
-职责（PRD F4）：
-- 遍历配置的 115 媒体库根目录，找出漏生成 STRM 的视频并补齐；
-- 清理“115 已不存在但本地仍有 STRM”的孤儿条目（受 `delete_sync` 控制）；
-- 对账结果汇总并触发飞牛媒体库刷新；
-- 仅在 `library_roots` 配置范围内执行删除，避免误删用户其他文件。
+两种模式（`reconcile_mode`）：
+- `history`（默认，快）：从 MoviePilot 整理历史读取 115 目标路径，补漏生成；
+- `scan`（慢，兜底）：遍历 115 媒体库根目录，补漏并清理孤儿（删除受 `delete_sync` 控制）。
+
+安全约束：
+- 只有目录扫描成功且结果非空时才允许清理孤儿；
+- 孤儿清理仅在 `library_roots` 配置范围内执行。
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ from .u115 import U115Client, U115Error
 MAX_DEPTH = 8
 # 单次对账最多处理的文件数（防过量请求）
 MAX_ITEMS = 20000
+# 整理历史最大读取条数
+HISTORY_LIMIT = 10000
 
 
 class Reconciler:
@@ -83,6 +87,9 @@ class Reconciler:
         """
         return self._last_run
 
+    # ------------------------------------------------------------------
+    # 基础工具
+    # ------------------------------------------------------------------
     def _library_roots(self) -> List[str]:
         """
         返回配置的 115 媒体库根路径列表。
@@ -98,10 +105,10 @@ class Reconciler:
 
     def _list_dir(self, pan_dir: Path) -> Optional[List[Any]]:
         """
-        列出 115 目录。
+        列出 115 目录（v3 的 U115Pan.list 接收 FileItem）。
 
         :param pan_dir: 目录路径
-        :return: FileItem 列表或 None
+        :return: FileItem 列表或 None（失败）
         """
         try:
             from app.modules.filemanager.storages.u115 import U115Pan
@@ -130,16 +137,32 @@ class Reconciler:
             raw = raw.rsplit(".", 1)[-1]
         return raw.strip().lower()
 
+    def _within_roots(self, pan_path: str) -> bool:
+        """
+        判断路径是否在配置的媒体库根目录内。
+
+        :param pan_path: 115 路径
+        :return: 是否在范围内
+        """
+        normalized = (pan_path or "").replace("\\", "/")
+        for root in self._library_roots():
+            if normalized == root or normalized.startswith(root + "/"):
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    # 数据源一：115 全库扫描
+    # ------------------------------------------------------------------
     def _walk(
         self, pan_dir: Path, results: List[Tuple[str, int, str]], depth: int = 0
     ) -> bool:
         """
-        递归遍历 115 目录，收集视频文件（含 pickcode，避免补漏时二次查询）。
+        递归遍历 115 目录，收集视频文件（含 pickcode）。
 
         :param pan_dir: 当前目录
         :param results: 结果列表（append (path, size, pickcode)）
         :param depth: 当前深度
-        :return: 是否成功列举（用于安全判断：列举失败时禁止清理孤儿）
+        :return: 是否成功列举（用于安全判断：失败时禁止清理孤儿）
         """
         if depth > MAX_DEPTH or len(results) >= MAX_ITEMS:
             return True
@@ -167,19 +190,89 @@ class Reconciler:
             results.append((str(item_path), size, pickcode))
         return ok
 
-    def _within_roots(self, pan_path: str) -> bool:
+    def _scan_library(self) -> Tuple[List[Tuple[str, int, str]], bool]:
         """
-        判断路径是否在配置的媒体库根目录内。
+        扫描 115 媒体库根目录。
 
-        :param pan_path: 115 路径
-        :return: 是否在范围内
+        :return: (视频列表, 是否扫描成功)
         """
-        normalized = (pan_path or "").replace("\\", "/")
-        for root in self._library_roots():
-            if normalized == root or normalized.startswith(root + "/"):
-                return True
-        return False
+        roots = self._library_roots()
+        if not roots:
+            logger.warning("【CloudStrmKit】未配置 115 媒体库根路径（library_roots）")
+            return [], False
+        videos: List[Tuple[str, int, str]] = []
+        root_status: List[Dict[str, Any]] = []
+        scan_ok = False
+        for root in roots:
+            before = len(videos)
+            ok = self._walk(Path(root), videos)
+            root_status.append({"root": root, "ok": ok, "found": len(videos) - before})
+            scan_ok = scan_ok or ok
+        logger.info(
+            f"【CloudStrmKit】目录扫描：{len(videos)} 个视频，根目录状态={root_status}"
+        )
+        return videos, scan_ok
 
+    # ------------------------------------------------------------------
+    # 数据源二：整理历史（快）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _is_target_storage(storage: str) -> bool:
+        """
+        判断整理历史中的目标存储是否为 115。
+
+        :param storage: 存储名称/类型
+        :return: 是否 115
+        """
+        value = (storage or "").strip().lower()
+        return "115" in value or value == "u115"
+
+    def _history_targets(self) -> Optional[List[Tuple[str, int, str]]]:
+        """
+        从 MoviePilot 整理历史读取 115 目标视频（一次查询）。
+
+        :return: (路径, 大小, pickcode) 列表；读取失败返回 None
+        """
+        try:
+            from app.db import db
+            from app.db.models.transferhistory import TransferHistory
+        except Exception as err:  # noqa: BLE001 - 宿主模型不可用时回退扫描
+            logger.warning(f"【CloudStrmKit】无法导入整理历史模型，回退目录扫描：{err}")
+            return None
+        try:
+            rows = (
+                db.query(TransferHistory)
+                .filter(TransferHistory.dest_storage.isnot(None))
+                .order_by(TransferHistory.id.desc())
+                .limit(HISTORY_LIMIT)
+                .all()
+            )
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"【CloudStrmKit】读取整理历史失败，回退目录扫描：{err}")
+            return None
+        seen = set()
+        targets: List[Tuple[str, int, str]] = []
+        for row in rows:
+            dest = str(getattr(row, "dest", "") or "").replace("\\", "/")
+            if not dest or dest in seen:
+                continue
+            if not self._is_target_storage(str(getattr(row, "dest_storage", "") or "")):
+                continue
+            ext = Path(dest).suffix.lstrip(".").lower()
+            if ext not in self._config.video_ext_set:
+                continue
+            seen.add(dest)
+            pickcode = ""
+            raw_item = getattr(row, "dest_fileitem", None)
+            if isinstance(raw_item, dict):
+                pickcode = str(raw_item.get("pickcode") or "")
+            targets.append((dest, 0, pickcode))
+        logger.info(f"【CloudStrmKit】整理历史对账：{len(targets)} 个 115 视频")
+        return targets
+
+    # ------------------------------------------------------------------
+    # 主流程
+    # ------------------------------------------------------------------
     def run(self) -> Dict[str, Any]:
         """
         执行一次对账（同步阻塞，调用方负责放到后台线程）。
@@ -193,6 +286,7 @@ class Reconciler:
         started = time.monotonic()
         result: Dict[str, Any] = {
             "success": True,
+            "mode": self._config.reconcile_mode,
             "generated": 0,
             "removed": 0,
             "scanned": 0,
@@ -200,33 +294,34 @@ class Reconciler:
             "refreshed": 0,
         }
         try:
-            roots = self._library_roots()
-            if not roots:
-                result.update(success=False, message="未配置 115 媒体库根路径（library_roots）")
+            videos: List[Tuple[str, int, str]] = []
+            scan_ok = False
+            if self._config.reconcile_mode == "history":
+                history = self._history_targets()
+                if history is not None:
+                    videos = history
+                    scan_ok = True
+                else:
+                    videos, scan_ok = self._scan_library()
+            else:
+                videos, scan_ok = self._scan_library()
+
+            if not videos and not scan_ok:
+                result.update(
+                    success=False,
+                    message="对账数据源不可用（整理历史与目录扫描均失败）",
+                )
                 return result
 
-            videos: List[Tuple[str, int, str]] = []
-            root_status: List[Dict[str, Any]] = []
-            scan_ok = False
-            for root in roots:
-                before = len(videos)
-                ok = self._walk(Path(root), videos)
-                root_status.append({"root": root, "ok": ok, "found": len(videos) - before})
-                scan_ok = scan_ok or ok
             result["scanned"] = len(videos)
-            result["root_status"] = root_status
             if self._attachments is not None:
                 self._attachments.clear_cache()
-            logger.info(
-                f"【CloudStrmKit】对账开始：扫描到 {len(videos)} 个视频，"
-                f"根目录状态={root_status}"
-            )
-
             pan_paths = {path for path, _, _ in videos}
             refresh_dirs: List[Path] = []
             pickcode_cache: Dict[str, str] = {}
 
-            # 1. 补漏生成
+            # 1. 补漏生成（先写文件，最后批量落索引）
+            new_entries: List[IndexEntry] = []
             for pan_path, _size, host_pickcode in videos:
                 if self._stop_if_needed():
                     break
@@ -242,32 +337,40 @@ class Reconciler:
                     if not pickcode:
                         pickcode = self._u115.get_pickcode(pan_path)
                         pickcode_cache[pan_path] = pickcode
-                    entry = self._index.upsert(
-                        IndexEntry(
-                            id=StrmIndex.make_id(pan_path),
-                            pan_storage=self._config.source_storage,
-                            pan_path=pan_path,
-                            pickcode=pickcode,
-                            strm_path=str(strm_path),
-                        )
+                    entry = IndexEntry(
+                        id=StrmIndex.make_id(pan_path),
+                        pan_storage=self._config.source_storage,
+                        pan_path=pan_path,
+                        pickcode=pickcode,
+                        strm_path=str(strm_path),
                     )
                     write_strm(strm_path, self._builder.build_url(entry.id))
+                    new_entries.append(entry)
                     result["generated"] += 1
                     refresh_dirs.append(strm_path.parent)
                     if self._attachments is not None and self._config.reconcile_sync_attachments:
                         try:
                             self._attachments.sync_for_video(pan_path, local_path, entry)
                         except Exception as err:  # noqa: BLE001
-                            logger.warning(f"【CloudStrmKit】对账附属文件同步失败：{pan_path}：{err}")
+                            logger.warning(
+                                f"【CloudStrmKit】对账附属文件同步失败：{pan_path}：{err}"
+                            )
                 except U115Error as err:
                     result["failed"] += 1
                     logger.warning(f"【CloudStrmKit】对账补漏失败：{pan_path}：{err}")
                 except Exception as err:  # noqa: BLE001
                     result["failed"] += 1
                     logger.error(f"【CloudStrmKit】对账补漏异常：{pan_path}：{err}")
+            if new_entries:
+                self._index.add_many(new_entries)
 
-            # 2. 清理孤儿（仅限媒体库根内、delete_sync 开启，且扫描必须成功且有结果）
-            if self._config.delete_sync and scan_ok and result["scanned"] > 0:
+            # 2. 清理孤儿（仅全库扫描模式、扫描成功且有结果时执行）
+            if (
+                self._config.delete_sync
+                and self._config.reconcile_mode == "scan"
+                and scan_ok
+                and result["scanned"] > 0
+            ):
                 for entry in self._index.all_items():
                     if not self._within_roots(entry.pan_path):
                         continue
@@ -279,20 +382,22 @@ class Reconciler:
                         result["removed"] += 1
                         refresh_dirs.append(Path(entry.strm_path).parent)
                     except Exception as err:  # noqa: BLE001
-                        logger.warning(f"【CloudStrmKit】清理孤儿失败：{entry.strm_path}：{err}")
+                        logger.warning(
+                            f"【CloudStrmKit】清理孤儿失败：{entry.strm_path}：{err}"
+                        )
 
             # 3. 飞牛刷新（去重）
             if self._fnos is not None:
-                seen = set()
+                seen_dirs = set()
                 for directory in refresh_dirs:
                     fnos_dir = PathMapper.to_fnos_path(
                         directory,
                         self._config.strm_root_local,
                         self._config.strm_root_fnos,
                     )
-                    if fnos_dir is None or str(fnos_dir) in seen:
+                    if fnos_dir is None or str(fnos_dir) in seen_dirs:
                         continue
-                    seen.add(str(fnos_dir))
+                    seen_dirs.add(str(fnos_dir))
                     item = self._fnos.build_item(None, None, None, None, fnos_dir)
                     if item is not None:
                         self._fnos.queue(item)
@@ -300,8 +405,9 @@ class Reconciler:
 
             result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 1)
             logger.info(
-                f"【CloudStrmKit】对账完成：扫描 {result['scanned']}，补漏 {result['generated']}，"
-                f"清理 {result['removed']}，失败 {result['failed']}，刷新 {result['refreshed']}"
+                f"【CloudStrmKit】对账完成（{result['mode']}）：扫描 {result['scanned']}，"
+                f"补漏 {result['generated']}，清理 {result['removed']}，"
+                f"失败 {result['failed']}，刷新 {result['refreshed']}"
             )
             return result
         finally:
