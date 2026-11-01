@@ -61,7 +61,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.9.0"
+    plugin_version = "0.9.1"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -928,6 +928,48 @@ class CloudStrmKit(_PluginBase):
         }
 
     # ------------------------------------------------------------------
+    # 配置选项（从宿主读取，避免手填）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _storage_options() -> List[Dict[str, str]]:
+        """
+        读取 MoviePilot 已配置的 115 存储名称。
+
+        :return: VSelect 选项列表
+        """
+        try:
+            from app.application.storage import StorageHelper
+
+            options: List[Dict[str, str]] = []
+            for conf in StorageHelper.get_storagies():
+                name = str(getattr(conf, "name", "") or "")
+                stype = str(getattr(conf, "type", "") or "")
+                if stype == "u115" or "115" in name:
+                    options.append(
+                        {"title": f"{name}（{stype}）", "value": name or stype}
+                    )
+            return options
+        except Exception as err:  # noqa: BLE001 - 读取失败时退回手填
+            logger.warning(f"【CloudStrmKit】读取存储列表失败：{err}")
+            return []
+
+    @staticmethod
+    def _fnos_options() -> List[Dict[str, str]]:
+        """
+        读取 MoviePilot 已配置的飞牛媒体服务器实例名。
+
+        :return: VSelect 选项列表
+        """
+        try:
+            from app.sdk.services import MediaServerHelper
+
+            services = MediaServerHelper().get_services(type_filter="trimemedia")
+            return [{"title": name, "value": name} for name in services.keys()]
+        except Exception as err:  # noqa: BLE001 - 读取失败时退回手填
+            logger.warning(f"【CloudStrmKit】读取媒体服务器列表失败：{err}")
+            return []
+
+    # ------------------------------------------------------------------
     # 配置页
     # ------------------------------------------------------------------
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
@@ -937,6 +979,38 @@ class CloudStrmKit(_PluginBase):
         :return: Vuetify 组件树与默认配置
         """
         defaults = CloudStrmKitConfig().model_dump()
+        storage_options = self._storage_options()
+        fnos_options = self._fnos_options()
+
+        def select_or_text(
+            model: str,
+            label: str,
+            options: List[Dict[str, str]],
+            placeholder: str = "",
+        ) -> Dict[str, Any]:
+            """
+            有候选时用下拉选择，无候选时退回文本框。
+
+            :param model: 配置字段名
+            :param label: 标签
+            :param options: 候选列表
+            :param placeholder: 文本框占位
+            :return: 组件字典
+            """
+            if options:
+                return {
+                    "component": "VSelect",
+                    "props": {
+                        "model": model,
+                        "label": label,
+                        "items": options,
+                        "clearable": True,
+                    },
+                }
+            return {
+                "component": "VTextField",
+                "props": {"model": model, "label": label, "placeholder": placeholder},
+            }
         return [
             {
                 "component": "VForm",
@@ -980,28 +1054,24 @@ class CloudStrmKit(_PluginBase):
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 3},
                                 "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "source_storage",
-                                            "label": "115 存储名称",
-                                            "placeholder": "115网盘",
-                                        },
-                                    }
+                                    select_or_text(
+                                        "source_storage",
+                                        "115 存储名称",
+                                        storage_options,
+                                        "115网盘",
+                                    )
                                 ],
                             },
                             {
                                 "component": "VCol",
                                 "props": {"cols": 12, "md": 3},
                                 "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "fnos_instance",
-                                            "label": "飞牛媒体服务器实例名",
-                                            "placeholder": "如 MyFnos",
-                                        },
-                                    }
+                                    select_or_text(
+                                        "fnos_instance",
+                                        "飞牛媒体服务器实例名",
+                                        fnos_options,
+                                        "如 MyFnos",
+                                    )
                                 ],
                             },
                             {
@@ -1330,100 +1400,33 @@ class CloudStrmKit(_PluginBase):
     # ------------------------------------------------------------------
     def get_page(self) -> Optional[List[dict]]:
         """
-        拼装插件详情页（统计、对账状态、播放日志、最近生成与操作提示）。
+        拼装插件详情页（统计卡片、对账状态、示例 STRM、播放日志、最近生成）。
 
         :return: Vuetify 组件树
         """
         stats = self._index.stats() if self._index is not None else {}
-        cards = [
-            ("索引条目", stats.get("total", 0)),
-            ("附属文件", stats.get("attachments", 0)),
-            ("缺失 pickcode", stats.get("missing_pickcode", 0)),
-            ("对账模式", self._config.reconcile_mode),
-        ]
 
-        last_run = self._reconciler.last_run if self._reconciler is not None else None
-        if last_run:
-            reconcile_text = (
-                f"模式 {last_run.get('mode', '-')}｜扫描 {last_run.get('scanned', 0)}"
-                f"｜补漏 {last_run.get('generated', 0)}｜清理 {last_run.get('removed', 0)}"
-                f"｜失败 {last_run.get('failed', 0)}"
-                f"｜耗时 {last_run.get('elapsed_ms', 0)}ms"
-            )
-        else:
-            reconcile_text = "尚未执行（定时任务：{}）".format(self._config.reconcile_cron or "未配置")
-
-        play_items = self._play.recent_logs(10) if self._play is not None else []
-        play_lines = [
-            "{} · {} · {} · {}".format(
-                item.get("time", ""),
-                item.get("status", ""),
-                str(item.get("ua", ""))[:36],
-                str(item.get("pan_path", ""))[-56:],
-            )
-            for item in play_items
-        ] or ["暂无播放记录"]
-
-        recent_items = []
-        if self._index is not None:
-            recent_items = sorted(
-                self._index.all_items(), key=lambda item: item.created_at, reverse=True
-            )[:8]
-        recent_lines = [item.pan_path for item in recent_items] or ["暂无记录"]
-
-        sample_text = "暂无"
-        if self._builder is not None and recent_items:
-            try:
-                sample_text = self._builder.build_url(recent_items[0].id)
-            except Exception:  # noqa: BLE001
-                sample_text = "生成失败"
-
-        def text_card(title: str, lines: List[str]) -> dict:
-            """构造文本卡片。"""
+        def stat_card(icon: str, label: str, value: Any, color: str) -> dict:
+            """构造统计卡片。"""
             return {
                 "component": "VCol",
-                "props": {"cols": 12, "md": 6},
+                "props": {"cols": 6, "md": 3},
                 "content": [
                     {
                         "component": "VCard",
-                        "props": {"variant": "tonal"},
+                        "props": {"variant": "tonal", "color": color, "class": "h-100"},
                         "content": [
-                            {
-                                "component": "VCardTitle",
-                                "props": {"class": "text-subtitle-2"},
-                                "text": title,
-                            },
                             {
                                 "component": "VCardText",
-                                "props": {"class": "text-caption"},
+                                "props": {"class": "d-flex align-center ga-3"},
                                 "content": [
-                                    {"component": "div", "text": line} for line in lines
-                                ],
-                            },
-                        ],
-                    }
-                ],
-            }
-
-        return [
-            {
-                "component": "VRow",
-                "content": [
-                    {
-                        "component": "VCol",
-                        "props": {"cols": 12, "md": 6, "lg": 3},
-                        "content": [
-                            {
-                                "component": "VCard",
-                                "props": {"variant": "tonal"},
-                                "content": [
+                                    {"component": "VIcon", "props": {"size": "32", "icon": icon}},
                                     {
-                                        "component": "VCardText",
-                                        "props": {"class": "text-center"},
+                                        "component": "div",
                                         "content": [
                                             {
                                                 "component": "div",
-                                                "props": {"class": "text-h6"},
+                                                "props": {"class": "text-h5 font-weight-bold"},
                                                 "text": str(value),
                                             },
                                             {
@@ -1432,26 +1435,193 @@ class CloudStrmKit(_PluginBase):
                                                 "text": label,
                                             },
                                         ],
-                                    }
+                                    },
                                 ],
                             }
                         ],
                     }
-                    for label, value in cards
+                ],
+            }
+
+        def panel(title: str, icon: str, body: List[dict]) -> dict:
+            """构造信息面板。"""
+            return {
+                "component": "VCol",
+                "props": {"cols": 12, "md": 6},
+                "content": [
+                    {
+                        "component": "VCard",
+                        "props": {"variant": "outlined", "class": "h-100"},
+                        "content": [
+                            {
+                                "component": "VCardTitle",
+                                "props": {
+                                    "class": "d-flex align-center ga-2 text-subtitle-1"
+                                },
+                                "content": [
+                                    {"component": "VIcon", "props": {"size": "20", "icon": icon}},
+                                    {"component": "span", "text": title},
+                                ],
+                            },
+                            {"component": "VCardText", "content": body},
+                        ],
+                    }
+                ],
+            }
+
+        def kv_rows(rows: List[tuple]) -> List[dict]:
+            """键值行。"""
+            return [
+                {
+                    "component": "div",
+                    "props": {"class": "d-flex justify-space-between py-1"},
+                    "content": [
+                        {
+                            "component": "span",
+                            "props": {"class": "text-caption text-medium-emphasis"},
+                            "text": key,
+                        },
+                        {
+                            "component": "span",
+                            "props": {"class": "text-body-2 font-weight-medium"},
+                            "text": str(value),
+                        },
+                    ],
+                }
+                for key, value in rows
+            ]
+
+        last_run = self._reconciler.last_run if self._reconciler is not None else None
+        if last_run:
+            reconcile_rows = [
+                ("模式", last_run.get("mode", "-")),
+                ("扫描", last_run.get("scanned", 0)),
+                ("补漏", last_run.get("generated", 0)),
+                ("清理", last_run.get("removed", 0)),
+                ("失败", last_run.get("failed", 0)),
+                ("耗时", f"{last_run.get('elapsed_ms', 0)} ms"),
+            ]
+        else:
+            reconcile_rows = [
+                ("状态", "尚未执行"),
+                ("定时任务", self._config.reconcile_cron or "未配置"),
+            ]
+
+        play_items = self._play.recent_logs(10) if self._play is not None else []
+        play_nodes: List[dict] = []
+        for item in play_items:
+            status = item.get("status")
+            play_nodes.append(
+                {
+                    "component": "VListItem",
+                    "props": {
+                        "title": str(item.get("time", "")),
+                        "subtitle": "{} · {} · {}".format(
+                            status,
+                            str(item.get("ua", ""))[:40],
+                            Path(str(item.get("pan_path", ""))).name,
+                        ),
+                        "prepend-icon": (
+                            "mdi-play-circle-outline"
+                            if status == 302
+                            else "mdi-alert-circle-outline"
+                        ),
+                    },
+                }
+            )
+        if not play_nodes:
+            play_nodes = [
+                {
+                    "component": "VAlert",
+                    "props": {"type": "info", "variant": "tonal", "text": "暂无播放记录"},
+                }
+            ]
+
+        recent_items: List[Any] = []
+        if self._index is not None:
+            recent_items = sorted(
+                self._index.all_items(), key=lambda item: item.created_at, reverse=True
+            )[:8]
+        recent_nodes: List[dict] = [
+            {
+                "component": "VListItem",
+                "props": {
+                    "title": Path(item.pan_path).name,
+                    "subtitle": str(Path(item.pan_path).parent),
+                    "prepend-icon": "mdi-file-video-outline",
+                },
+            }
+            for item in recent_items
+        ]
+        if not recent_nodes:
+            recent_nodes = [
+                {
+                    "component": "VAlert",
+                    "props": {"type": "info", "variant": "tonal", "text": "暂无记录"},
+                }
+            ]
+
+        sample_text = "暂无"
+        if self._builder is not None and recent_items:
+            try:
+                sample_text = self._builder.build_url(recent_items[0].id)
+            except Exception:  # noqa: BLE001
+                sample_text = "生成失败"
+
+        return [
+            {
+                "component": "VRow",
+                "content": [
+                    stat_card("mdi-database-outline", "索引条目", stats.get("total", 0), "primary"),
+                    stat_card("mdi-paperclip", "附属文件", stats.get("attachments", 0), "info"),
+                    stat_card(
+                        "mdi-key-alert", "缺失 pickcode", stats.get("missing_pickcode", 0), "warning"
+                    ),
+                    stat_card("mdi-sync", "对账模式", self._config.reconcile_mode, "success"),
                 ],
             },
             {
                 "component": "VRow",
                 "content": [
-                    text_card("对账状态", [reconcile_text]),
-                    text_card("示例 STRM 内容", [sample_text]),
+                    panel("对账状态", "mdi-sync-circle", kv_rows(reconcile_rows)),
+                    panel(
+                        "示例 STRM 内容",
+                        "mdi-link-variant",
+                        [
+                            {
+                                "component": "div",
+                                "props": {"class": "text-body-2 text-break"},
+                                "text": sample_text,
+                            }
+                        ],
+                    ),
                 ],
             },
             {
                 "component": "VRow",
                 "content": [
-                    text_card("最近播放", play_lines),
-                    text_card("最近生成", recent_lines),
+                    panel(
+                        "最近播放",
+                        "mdi-play-circle",
+                        [
+                            {
+                                "component": "VList",
+                                "props": {"density": "compact"},
+                                "content": play_nodes,
+                            }
+                        ],
+                    ),
+                    panel(
+                        "最近生成",
+                        "mdi-file-video",
+                        [
+                            {
+                                "component": "VList",
+                                "props": {"density": "compact"},
+                                "content": recent_nodes,
+                            }
+                        ],
+                    ),
                 ],
             },
             {
@@ -1466,9 +1636,10 @@ class CloudStrmKit(_PluginBase):
                                 "props": {
                                     "type": "info",
                                     "variant": "tonal",
+                                    "class": "text-caption",
                                     "text": (
-                                        "操作接口：POST /reconcile（可带 ?paths=115路径前缀）、"
-                                        "POST /rebuild（全量重写）、GET /attachments/orphans（孤儿扫描）"
+                                        "操作接口：POST /reconcile?paths=、POST /rebuild、"
+                                        "GET /attachments/orphans、GET /diag/notify-test"
                                     ),
                                 },
                             }
