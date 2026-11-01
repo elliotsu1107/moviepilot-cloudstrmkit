@@ -1,21 +1,32 @@
 """
 CloudStrmKit 插件入口。
 
-当前阶段（T3）：配置模型、索引持久化、整理事件载荷记录、115 换链诊断。
-后续任务：STRM 生成、115 302、飞牛刷新、对账（见 docs/PLAN.md）。
+当前阶段（T6）：整理完成事件驱动 STRM 生成、飞牛媒体库刷新、302 播放、诊断接口。
+后续任务：附属文件同步、定时对账（见 docs/PLAN.md）。
 """
 
 import json
+import queue
+import threading
+import time
+import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.schemas.types import EventType
+from app.schemas.types import EventType, MediaType
 from app.sdk.events import eventmanager
 from app.sdk.logging import logger
 from app.sdk.plugin import _PluginBase
+from fastapi import Request
+from fastapi.responses import Response
 
 from .config import CloudStrmKitConfig
 from .diagnostics import DiagEventLog, extract_transfer_fields, probe_u115_download
-from .index import StrmIndex
+from .fnos import FnosRefresher
+from .index import IndexEntry, StrmIndex
+from .redirect import PlayService
+from .strm import PathMapper, StrmContentBuilder, write_strm
+from .u115 import U115Client, U115Error
 
 # 插件标识（与 package.v3.json 的 key 一致）
 PLUGIN_ID = "CloudStrmKit"
@@ -42,7 +53,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.1.4"
+    plugin_version = "0.2.0"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -58,23 +69,70 @@ class CloudStrmKit(_PluginBase):
     _config: CloudStrmKitConfig = CloudStrmKitConfig()
     _index: Optional[StrmIndex] = None
     _diag: Optional[DiagEventLog] = None
+    _mapper: Optional[PathMapper] = None
+    _builder: Optional[StrmContentBuilder] = None
+    _u115: Optional[U115Client] = None
+    _fnos: Optional[FnosRefresher] = None
+    _play: Optional[PlayService] = None
+    _queue: Optional["queue.Queue[Dict[str, Any]]"] = None
+    _worker: Optional[threading.Thread] = None
+    _stop_event: threading.Event = threading.Event()
 
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
     def init_plugin(self, config: Optional[Dict[str, Any]] = None) -> None:
         """
-        初始化插件：解析配置并加载 STRM 索引。
+        初始化插件：配置、索引、映射、115 客户端、飞牛刷新器与后台工作线程。
 
         :param config: 插件配置字典
         """
         self._config = self._parse_config(config)
-        self._index = StrmIndex(self.get_data_path())
-        self._diag = DiagEventLog(self.get_data_path())
+        data_dir = self.get_data_path()
+        self._index = StrmIndex(data_dir)
+        self._diag = DiagEventLog(data_dir)
+
+        secret = self._config.secret or self._ensure_secret(config)
+        self._mapper = PathMapper(self._config.path_mappings)
+        self._builder = StrmContentBuilder(self._config.base_url, secret, PLUGIN_ID)
+        self._u115 = U115Client(cache_ttl=self._config.cache_ttl, qps=self._config.qps)
+        self._fnos = FnosRefresher(self._config.fnos_instance)
+        self._play = PlayService(
+            self._index, self._builder, self._u115, debug=self._config.debug
+        )
+
+        self._queue = queue.Queue(maxsize=2000)
+        self._stop_event = threading.Event()
+        if self._config.enabled:
+            self._worker = threading.Thread(
+                target=self._worker_loop,
+                name="CloudStrmKitWorker",
+                daemon=True,
+            )
+            self._worker.start()
+
         logger.info(
             f"【CloudStrmKit】插件初始化，enabled={self._config.enabled}，"
-            f"索引条目={len(self._index)}，数据目录={self.get_data_path()}"
+            f"索引条目={len(self._index)}，映射={len(self._mapper.mappings)} 条，"
+            f"飞牛实例={self._config.fnos_instance or '未配置'}，数据目录={data_dir}"
         )
+
+    def _ensure_secret(self, config: Optional[Dict[str, Any]]) -> str:
+        """
+        生成并持久化 STRM 签名密钥。
+
+        :param config: 当前插件配置（可能为 None）
+        :return: 新生成的密钥
+        """
+        new_secret = uuid.uuid4().hex
+        merged = dict(config or {})
+        merged["secret"] = new_secret
+        try:
+            self.update_config(merged)
+            logger.info("【CloudStrmKit】已自动生成 STRM 签名密钥并写入配置")
+        except Exception as err:  # noqa: BLE001 - 配置写入失败不阻断插件启动
+            logger.error(f"【CloudStrmKit】写入签名密钥失败：{err}")
+        return new_secret
 
     def get_state(self) -> bool:
         """
@@ -86,14 +144,23 @@ class CloudStrmKit(_PluginBase):
 
     def stop_service(self) -> None:
         """
-        停止插件服务：保存索引并释放引用。
+        停止插件服务：停止后台线程与刷新器，保存索引并释放引用。
         """
+        self._stop_event.set()
+        if self._fnos is not None:
+            self._fnos.stop()
+        if self._worker is not None and self._worker.is_alive():
+            self._worker.join(timeout=5)
         if self._index is not None:
             try:
                 self._index.save()
             except Exception as err:  # noqa: BLE001 - 停止阶段不阻断宿主
                 logger.error(f"【CloudStrmKit】停止时保存索引失败：{err}")
+        self._worker = None
         self._index = None
+        self._play = None
+        self._queue = None
+        logger.info("【CloudStrmKit】插件已停止")
 
     # ------------------------------------------------------------------
     # 配置解析
@@ -164,6 +231,22 @@ class CloudStrmKit(_PluginBase):
                 "summary": "清空事件记录",
                 "description": "清空 T3 诊断事件记录",
             },
+            {
+                "path": "/play",
+                "endpoint": self.api_play,
+                "methods": ["GET"],
+                "allow_anonymous": True,
+                "summary": "302 播放",
+                "description": "校验签名后用请求方 UA 换取 115 直链并返回 302",
+            },
+            {
+                "path": "/play/logs",
+                "endpoint": self.api_play_logs,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "播放日志",
+                "description": "返回最近的播放请求日志",
+            },
         ]
 
     def ping(self) -> Dict[str, Any]:
@@ -193,12 +276,12 @@ class CloudStrmKit(_PluginBase):
         return {"success": True, "message": "", "data": stats}
 
     # ------------------------------------------------------------------
-    # 诊断（T3 真机验证）
+    # 整理完成事件 → 后台队列 → STRM 生成
     # ------------------------------------------------------------------
     @eventmanager.register(EventType.TransferComplete)
     async def on_transfer_complete(self, event: Any) -> None:
         """
-        记录整理完成事件载荷（用于确认 target_item/storage/pickcode 可用性）。
+        接收整理完成事件：记录载荷并提交后台生成任务。
 
         :param event: 事件对象
         """
@@ -206,12 +289,167 @@ class CloudStrmKit(_PluginBase):
             fields = extract_transfer_fields(event.event_data)
             if self._diag is not None:
                 self._diag.record(fields)
+            if not self._config.enabled or self._queue is None:
+                return
+            task = self._build_task(fields)
+            if task is None:
+                return
             logger.info(
-                f"【CloudStrmKit】整理完成事件："
-                f"{json.dumps(fields, ensure_ascii=False)[:1000]}"
+                f"【CloudStrmKit】接收整理完成：{len(task['files'])} 个文件，"
+                f"存储={task['storage']}"
             )
+            try:
+                self._queue.put_nowait(task)
+            except queue.Full:
+                logger.warning("【CloudStrmKit】任务队列已满，丢弃本次整理事件")
         except Exception as err:  # noqa: BLE001 - 事件处理异常不能外抛
             logger.error(f"【CloudStrmKit】处理整理完成事件失败：{err}")
+
+    def _build_task(self, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        从事件载荷构造生成任务（过滤存储与视频文件）。
+
+        :param fields: 事件关键字段
+        :return: 任务字典或 None（无需处理）
+        """
+        if not fields.get("success"):
+            return None
+        target_item = fields.get("target_item") or {}
+        storage = fields.get("target_storage") or target_item.get("storage") or ""
+        if not self._is_target_storage(str(storage)):
+            return None
+        media = fields.get("media") or {}
+        raw_files = [p for p in (fields.get("file_list_new") or []) if p]
+        target_path = target_item.get("path") or ""
+        if not raw_files and target_path:
+            raw_files = [target_path]
+        files = [str(p) for p in raw_files if self._is_video_path(str(p))]
+        if not files:
+            return None
+        return {
+            "storage": str(storage),
+            "files": files,
+            "pickcode": str(target_item.get("pickcode") or ""),
+            "media": media,
+        }
+
+    def _is_target_storage(self, storage: str) -> bool:
+        """
+        判断整理目标存储是否为配置的 115 存储（名称或类型）。
+
+        :param storage: 存储名称/类型
+        :return: 是否匹配
+        """
+        storage = (storage or "").strip()
+        if not storage:
+            return False
+        configured = (self._config.source_storage or "").strip()
+        if configured and storage == configured:
+            return True
+        lowered = storage.lower()
+        return "115" in lowered or lowered in {"u115", "115网盘"}
+
+    def _is_video_path(self, path: str) -> bool:
+        """
+        判断路径是否为配置的视频扩展名。
+
+        :param path: 文件路径
+        :return: 是否视频
+        """
+        ext = Path(path).suffix.lstrip(".").lower()
+        return bool(ext) and ext in self._config.video_ext_set
+
+    def _worker_loop(self) -> None:
+        """后台任务循环：串行处理生成任务。"""
+        assert self._queue is not None
+        while not self._stop_event.is_set():
+            try:
+                task = self._queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                self._process_task(task)
+            except Exception as err:  # noqa: BLE001 - 后台任务异常不能终止线程
+                logger.error(f"【CloudStrmKit】处理生成任务失败：{err}", exc_info=True)
+            finally:
+                self._queue.task_done()
+
+    def _process_task(self, task: Dict[str, Any]) -> None:
+        """
+        处理单个整理任务：生成 STRM、写入索引、提交飞牛刷新。
+
+        :param task: 生成任务
+        """
+        if self._index is None or self._mapper is None or self._builder is None:
+            return
+        media = task.get("media") or {}
+        generated = 0
+        refresh_items: List[Any] = []
+        for pan_path in task.get("files") or []:
+            pan_path = str(pan_path)
+            local_path = self._mapper.map(pan_path)
+            if local_path is None:
+                logger.warning(f"【CloudStrmKit】路径无映射，跳过：{pan_path}")
+                continue
+            strm_path = local_path.with_suffix(".strm")
+            file_pickcode = str(task.get("pickcode") or "")
+            if not file_pickcode and self._u115 is not None:
+                try:
+                    file_pickcode = self._u115.get_pickcode(pan_path)
+                except U115Error as err:
+                    logger.error(f"【CloudStrmKit】获取 pickcode 失败：{pan_path}：{err}")
+                    continue
+            if not file_pickcode:
+                logger.error(f"【CloudStrmKit】缺少 pickcode，跳过：{pan_path}")
+                continue
+            try:
+                entry = self._index.upsert(
+                    IndexEntry(
+                        id=StrmIndex.make_id(pan_path),
+                        pan_storage=str(task.get("storage") or ""),
+                        pan_path=pan_path,
+                        pickcode=file_pickcode,
+                        strm_path=str(strm_path),
+                        media_type=str(media.get("type") or ""),
+                    )
+                )
+                url = self._builder.build_url(entry.id)
+                write_strm(strm_path, url)
+                generated += 1
+            except Exception as err:  # noqa: BLE001 - 单个文件失败不影响其他文件
+                logger.error(f"【CloudStrmKit】生成 STRM 失败：{strm_path}：{err}")
+                continue
+
+            # 飞牛刷新项：使用 STRM 所在影片目录的飞牛视角路径
+            fnos_dir = PathMapper.to_fnos_path(
+                strm_path.parent,
+                self._config.strm_root_local,
+                self._config.strm_root_fnos,
+            )
+            if fnos_dir is None or self._fnos is None:
+                continue
+            media_type = None
+            if media.get("type"):
+                try:
+                    media_type = MediaType(str(media.get("type")))
+                except Exception:  # noqa: BLE001
+                    media_type = None
+            item = self._fnos.build_item(
+                title=media.get("title"),
+                year=media.get("year"),
+                media_type=media_type,
+                category=media.get("category"),
+                target_path=fnos_dir,
+            )
+            if item is not None:
+                refresh_items.append(item)
+
+        if self._fnos is not None:
+            for item in refresh_items:
+                self._fnos.queue(item)
+        logger.info(
+            f"【CloudStrmKit】生成完成：{generated} 个 STRM，刷新项 {len(refresh_items)} 个"
+        )
 
     def api_event_log(self, limit: int = 20) -> Dict[str, Any]:
         """
@@ -253,6 +491,37 @@ class CloudStrmKit(_PluginBase):
         }
 
     # ------------------------------------------------------------------
+    # 播放（302）
+    # ------------------------------------------------------------------
+    def api_play(self, request: Request, f: str = "", e: int = 0, sig: str = "") -> Response:
+        """
+        播放请求入口：验签 → 换链 → 302。
+
+        :param request: FastAPI 请求对象
+        :param f: 索引 ID
+        :param e: 过期时间戳
+        :param sig: 签名
+        :return: 302 或错误响应
+        """
+        if self._play is None:
+            return Response(
+                status_code=503,
+                content=json.dumps({"success": False, "message": "插件未初始化"}, ensure_ascii=False),
+                media_type="application/json",
+            )
+        return self._play.handle(request, f, e, sig)
+
+    def api_play_logs(self, limit: int = 50) -> Dict[str, Any]:
+        """
+        返回最近播放日志。
+
+        :param limit: 最大条数
+        :return: 统一响应结构
+        """
+        logs = self._play.recent_logs(limit) if self._play else []
+        return {"success": True, "message": "", "data": {"items": logs}}
+
+    # ------------------------------------------------------------------
     # 配置页
     # ------------------------------------------------------------------
     def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
@@ -278,8 +547,9 @@ class CloudStrmKit(_PluginBase):
                                         "props": {
                                             "type": "info",
                                             "variant": "tonal",
-                                            "text": "当前阶段仅完成配置与索引（T2）。"
-                                            "事件驱动 STRM 生成、302 播放、飞牛刷新将在后续任务接入。",
+                                            "text": "整理完成后自动生成 STRM 并刷新飞牛媒体库；"
+                                            "播放时本插件用请求方 UA 换取 115 直链并 302。"
+                                            "请先配置 115 存储名称、飞牛实例、基础地址与路径映射。",
                                         },
                                     }
                                 ],
