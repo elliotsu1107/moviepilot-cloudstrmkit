@@ -120,6 +120,7 @@ class PlayService:
                 "ua": user_agent[:120],
                 "pan_path": entry.pan_path,
                 "status": 302,
+                "cached": self._u115.last_cached,
                 "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
             }
         )

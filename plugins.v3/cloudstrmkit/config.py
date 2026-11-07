@@ -46,7 +46,9 @@ class CloudStrmKitConfig(BaseModel):
     library_roots: str = Field(default="", description="对账用的 115 媒体库根路径，多行")
 
     # 302 与限频
-    cache_ttl: int = Field(default=1200, ge=30, description="直链缓存秒数")
+    cache_ttl: int = Field(
+        default=7200, ge=30, description="直链缓存秒数（自动受直链有效期约束）"
+    )
     qps: float = Field(default=2.0, gt=0, description="115 换链限频（每秒请求数）")
     cooldown_seconds: int = Field(default=60, ge=0, description="风控冷却秒数")
     secret: str = Field(default="", description="STRM 签名密钥")

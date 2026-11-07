@@ -153,6 +153,33 @@ def _extract_first_url(download_data: Dict[str, Any]) -> Optional[str]:
         return None
 
 
+def _ttl_from_url(url: str, fallback: int) -> int:
+    """
+    按直链 URL 中的过期时间戳（t 参数）计算安全缓存时长。
+
+    115 直链带 `t=<过期时间戳>`，缓存到过期前 60 秒可避免播放器拿到失效直链
+    导致重新连接/卡顿。
+
+    :param url: 115 直链
+    :param fallback: 无法解析时使用的配置 TTL
+    :return: 缓存秒数（<=0 表示不缓存）
+    """
+    try:
+        query = urllib.parse.urlparse(url).query
+        params = urllib.parse.parse_qs(query)
+        raw = (params.get("t") or ["0"])[0]
+        expiry = int(raw)
+        if expiry <= 0:
+            return fallback
+        remaining = expiry - int(time.time()) - 60
+        if remaining <= 0:
+            logger.debug("【CloudStrmKit】115 直链临近过期，不写入缓存")
+            return 0
+        return min(fallback, remaining)
+    except Exception:  # noqa: BLE001 - 解析失败按配置 TTL
+        return fallback
+
+
 class U115Client:
     """115 直连客户端（token 来自宿主，请求绕过环境代理）。"""
 
@@ -174,6 +201,16 @@ class U115Client:
         self._qps = max(0.1, float(qps))
         self._throttle_lock = threading.Lock()
         self._last_request_at = 0.0
+        self._last_cached = False
+
+    @property
+    def last_cached(self) -> bool:
+        """
+        最近一次换链是否命中缓存（供播放日志诊断）。
+
+        :return: 是否命中缓存
+        """
+        return self._last_cached
 
     # ------------------------------------------------------------------
     # 宿主与 token
@@ -275,7 +312,7 @@ class U115Client:
 
     def get_download_url(self, pickcode: str, user_agent: str) -> str:
         """
-        获取 115 直链（带缓存）。
+        获取 115 直链（带缓存，缓存时长与直链有效期对齐，失败自动重试一次）。
 
         :param pickcode: 文件提取码
         :param user_agent: 请求方 UA（直链绑定此 UA）
@@ -286,14 +323,29 @@ class U115Client:
         key = _cache_key(pickcode, ua)
         cached = self._cache.get(key)
         if cached:
+            self._last_cached = True
             return str(cached)
-        data = self._request_downurl(pickcode, ua)
-        url = _extract_first_url(data)
-        if not url:
-            raise U115NotFound(f"115 未返回下载地址（pickcode={pickcode}）")
-        self._cache.set(key, url, self._ttl)
-        logger.debug(f"【CloudStrmKit】115 换链成功：{pickcode} UA={ua[:40]}")
-        return url
+        self._last_cached = False
+        last_error: Optional[U115Error] = None
+        for attempt in range(2):
+            try:
+                data = self._request_downurl(pickcode, ua)
+                url = _extract_first_url(data)
+                if not url:
+                    raise U115NotFound(f"115 未返回下载地址（pickcode={pickcode}）")
+                ttl = _ttl_from_url(url, self._ttl)
+                if ttl > 0:
+                    self._cache.set(key, url, ttl)
+                logger.debug(f"【CloudStrmKit】115 换链成功：{pickcode} UA={ua[:40]}")
+                return url
+            except (U115AuthError, U115RateLimited, U115NotFound):
+                raise
+            except U115Error as err:
+                last_error = err
+                if attempt == 0:
+                    logger.warning(f"【CloudStrmKit】115 换链失败，0.5 秒后重试：{err}")
+                    time.sleep(0.5)
+        raise last_error or U115Error("115 换链失败")
 
     # ------------------------------------------------------------------
     # 文件查询
