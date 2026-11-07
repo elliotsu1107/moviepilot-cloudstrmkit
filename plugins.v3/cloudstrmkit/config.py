@@ -49,6 +49,10 @@ class CloudStrmKitConfig(BaseModel):
     cache_ttl: int = Field(
         default=7200, ge=30, description="直链缓存秒数（自动受直链有效期约束）"
     )
+    web_channel_enabled: bool = Field(
+        default=False, description="启用 115 网页版换链（官方下载通道，速度更快）"
+    )
+    web_cookie: str = Field(default="", description="115 网页版 Cookie（仅 web 渠道需要）")
     qps: float = Field(default=2.0, gt=0, description="115 换链限频（每秒请求数）")
     cooldown_seconds: int = Field(default=60, ge=0, description="风控冷却秒数")
     secret: str = Field(default="", description="STRM 签名密钥")

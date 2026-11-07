@@ -61,7 +61,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.2"
+    plugin_version = "0.10.3"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -919,9 +919,14 @@ class CloudStrmKit(_PluginBase):
         return {"success": True, "message": "全量重写已开始（后台执行）", "data": None}
 
     def _rebuild_all(self) -> None:
-        """遍历索引重写全部 STRM 文件。"""
-        if self._index is None or self._builder is None:
+        """遍历索引重写全部 STRM 文件（按当前配置实时构建，避免持有旧 base_url）。"""
+        if self._index is None:
             return
+        builder = StrmContentBuilder(
+            self._config.base_url,
+            self._config.secret,
+            PLUGIN_ID,
+        )
         self._rebuilding = True
         started = time.monotonic()
         total = 0
@@ -929,7 +934,7 @@ class CloudStrmKit(_PluginBase):
         try:
             for entry in self._index.all_items():
                 try:
-                    write_strm(Path(entry.strm_path), self._builder.build_url(entry.id))
+                    write_strm(Path(entry.strm_path), builder.build_url(entry.id))
                     total += 1
                 except Exception as err:  # noqa: BLE001 - 单个失败不影响整体
                     failed += 1

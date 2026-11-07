@@ -28,6 +28,8 @@ from app.sdk.logging import logger
 OPEN_API_BASE = "https://proapi.115.com"
 # 获取下载地址接口
 DOWNURL_PATH = "/open/ufile/downurl"
+# 115 网页版换链接口（官方下载通道，需要 Cookie）
+WEB_API_DOWNLOAD = "https://webapi.115.com/files/download"
 # 未提供 UA 时的兜底 UA
 DEFAULT_USER_AGENT = "W115Storage/2.0"
 # 请求超时（秒）
@@ -185,9 +187,11 @@ class U115Client:
 
     def __init__(
         self,
-        cache_ttl: int = 1200,
+        cache_ttl: int = 7200,
         qps: float = 2.0,
         cache_maxsize: int = 1024,
+        web_enabled: bool = False,
+        web_cookie: str = "",
     ) -> None:
         """
         初始化客户端。
@@ -195,6 +199,8 @@ class U115Client:
         :param cache_ttl: 直链缓存有效期（秒）
         :param qps: 全局请求限频（每秒请求数）
         :param cache_maxsize: 直链缓存最大条目数
+        :param web_enabled: 是否启用 115 网页版换链
+        :param web_cookie: 115 网页版 Cookie
         """
         self._cache = _TTLCache(cache_maxsize)
         self._ttl = max(30, int(cache_ttl))
@@ -202,6 +208,8 @@ class U115Client:
         self._throttle_lock = threading.Lock()
         self._last_request_at = 0.0
         self._last_cached = False
+        self._web_enabled = bool(web_enabled)
+        self._web_cookie = (web_cookie or "").strip()
 
     @property
     def last_cached(self) -> bool:
