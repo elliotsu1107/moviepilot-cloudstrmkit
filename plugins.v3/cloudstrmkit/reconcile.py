@@ -157,6 +157,7 @@ class Reconciler:
                 remove_strm(Path(entry.strm_path))
                 if self._index.remove(entry.id) is not None:
                     removed += 1
+                    removed_paths.append(entry.pan_path)
             except Exception as err:  # noqa: BLE001
                 failed += 1
                 logger.warning(f"【CloudStrmKit】确认删除失败：{entry.strm_path}：{err}")
@@ -177,6 +178,7 @@ class Reconciler:
         :return: (删除数量, 是否因 115 查询异常中止)
         """
         removed = 0
+        removed_paths: List[str] = []
         for entry in candidates:
             if self._config.delete_sync_verify:
                 try:
@@ -191,14 +193,14 @@ class Reconciler:
                     logger.error(
                         f"【CloudStrmKit】删除前确认失败，中止删除：{entry.pan_path}：{err}"
                     )
-                    return removed, True
+                    return removed, True, removed_paths
             try:
                 remove_strm(Path(entry.strm_path))
                 if self._index.remove(entry.id) is not None:
                     removed += 1
             except Exception as err:  # noqa: BLE001
                 logger.warning(f"【CloudStrmKit】清理孤儿失败：{entry.strm_path}：{err}")
-        return removed, False
+        return removed, False, removed_paths
 
     @property
     def running(self) -> bool:
@@ -499,6 +501,9 @@ class Reconciler:
             "scanned": 0,
             "failed": 0,
             "refreshed": 0,
+            "generated_items": [],
+            "removed_items": [],
+            "refreshed_dirs": [],
         }
         try:
             videos: List[Tuple[str, int, str]] = []
@@ -569,6 +574,7 @@ class Reconciler:
                     self._cleanup_renamed(pan_path)
                     new_entries.append(entry)
                     result["generated"] += 1
+                    result["generated_items"].append(pan_path)
                     refresh_dirs.append(strm_path.parent)
                     if (
                         self._attachments is not None
@@ -628,8 +634,9 @@ class Reconciler:
                                 cooldown=600,
                             )
                     else:
-                        removed, aborted = self._delete_candidates(candidates)
+                        removed, aborted, removed_paths = self._delete_candidates(candidates)
                         result["removed"] = removed
+                        result["removed_items"].extend(removed_paths)
                         if aborted:
                             result["message"] = (
                                 f"删除过程中检测到 115 查询异常，已中止"
@@ -685,9 +692,27 @@ class Reconciler:
                 )
             return result
         finally:
+            result["elapsed_ms"] = round((time.monotonic() - started) * 1000, 1)
+            result["refreshed_dirs"] = [str(item) for item in refresh_dirs]
             with self._lock:
                 self._running = False
                 self._last_run = dict(result)
+            self._save_last_run(result)
+
+    def _save_last_run(self, result: Dict[str, Any]) -> None:
+        """
+        持久化最近一次对账结果（含明细，重启后可查）。
+
+        :param result: 对账结果
+        """
+        try:
+            path = self._pending_path.parent / "last_reconcile.json"
+            path.write_text(
+                json.dumps(result, ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+        except Exception as err:  # noqa: BLE001
+            logger.debug(f"【CloudStrmKit】保存对账结果失败：{err}")
 
     @staticmethod
     def _stop_if_needed() -> bool:

@@ -62,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.14"
+    plugin_version = "0.10.15"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -1937,6 +1937,38 @@ class CloudStrmKit(_PluginBase):
                 ("定时任务", self._config.reconcile_cron or "未配置"),
             ]
 
+        detail_nodes: List[dict] = []
+        if last_run:
+            generated = [
+                str(item).rsplit("/", 1)[-1]
+                for item in (last_run.get("generated_items") or [])
+            ][:10]
+            removed = [
+                str(item).rsplit("/", 1)[-1]
+                for item in (last_run.get("removed_items") or [])
+            ][:10]
+            refreshed = [
+                str(item).rsplit("/", 1)[-1]
+                for item in (last_run.get("refreshed_dirs") or [])
+            ][:10]
+            detail_nodes = [
+                {
+                    "component": "div",
+                    "props": {"class": "text-caption mt-2"},
+                    "text": "补漏：" + ("、".join(generated) or "无"),
+                },
+                {
+                    "component": "div",
+                    "props": {"class": "text-caption"},
+                    "text": "清理：" + ("、".join(removed) or "无"),
+                },
+                {
+                    "component": "div",
+                    "props": {"class": "text-caption"},
+                    "text": "刷新目录：" + ("、".join(refreshed) or "无"),
+                },
+            ]
+
         play_items = self._play.recent_logs(10) if self._play is not None else []
         play_nodes: List[dict] = []
         for item in play_items:
@@ -2013,7 +2045,11 @@ class CloudStrmKit(_PluginBase):
             {
                 "component": "VRow",
                 "content": [
-                    panel("对账状态", "mdi-sync-circle", kv_rows(reconcile_rows)),
+                    panel(
+                        "对账状态",
+                        "mdi-sync-circle",
+                        kv_rows(reconcile_rows) + detail_nodes,
+                    ),
                     panel(
                         "示例 STRM 内容",
                         "mdi-link-variant",
