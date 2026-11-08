@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import os
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -228,6 +229,76 @@ class AttachmentSyncer:
         if entry is not None:
             entry.attachments = synced
         return synced
+
+    def _has_related_attachments(self, local_dir: Path, video_stem: str) -> bool:
+        """
+        判断本地目录是否已有该视频相关的附属文件。
+
+        :param local_dir: 本地 STRM 目录
+        :param video_stem: 视频文件名（不含扩展名）
+        :return: 是否已有附件
+        """
+        try:
+            for path in local_dir.iterdir():
+                if not path.is_file():
+                    continue
+                if path.suffix.lstrip(".").lower() not in self._config.copy_ext_set:
+                    continue
+                if _is_related_to_video(path.name, video_stem):
+                    return True
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    def backfill(self, limit: int = 50, interval: float = 0.5) -> Dict[str, Any]:
+        """
+        补全缺失附件：遍历索引，对本地缺少相关附件的条目逐个从 115 同步。
+
+        :param limit: 本次最多处理的条目数
+        :param interval: 每处理一个条目的间隔秒数（节流，防 115 风控）
+        :return: 统计结果
+        """
+        processed = 0
+        synced_videos = 0
+        synced_files = 0
+        skipped = 0
+        failed = 0
+        for entry in self._index.all_items():
+            if processed >= limit:
+                break
+            local_dir = Path(entry.strm_path).parent
+            if not local_dir.exists():
+                continue
+            video_stem = Path(entry.pan_path).stem
+            if self._has_related_attachments(local_dir, video_stem):
+                skipped += 1
+                continue
+            processed += 1
+            try:
+                records = self.sync_for_video(
+                    entry.pan_path,
+                    local_dir / f"{video_stem}.mkv",
+                    entry,
+                )
+                if records:
+                    synced_videos += 1
+                    synced_files += len(records)
+            except Exception as err:  # noqa: BLE001
+                failed += 1
+                logger.warning(f"【CloudStrmKit】附件补全失败：{entry.pan_path}：{err}")
+            if interval > 0:
+                time.sleep(interval)
+        logger.info(
+            f"【CloudStrmKit】附件补全完成：处理 {processed}，同步视频 {synced_videos}，"
+            f"同步文件 {synced_files}，跳过 {skipped}，失败 {failed}"
+        )
+        return {
+            "processed": processed,
+            "synced_videos": synced_videos,
+            "synced_files": synced_files,
+            "skipped": skipped,
+            "failed": failed,
+        }
 
     def cleanup_for_video(self, pan_video_path: str, local_video_path: Path) -> int:
         """

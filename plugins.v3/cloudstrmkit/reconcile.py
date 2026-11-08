@@ -541,6 +541,7 @@ class Reconciler:
 
             # 1. 补漏生成（先写文件，最后批量落索引）
             new_entries: List[IndexEntry] = []
+            attachment_synced = 0
             for pan_path, _size, host_pickcode in videos:
                 if self._stop_if_needed():
                     break
@@ -572,8 +573,9 @@ class Reconciler:
                     if (
                         self._attachments is not None
                         and self._config.reconcile_sync_attachments
-                        and effective_mode != "scan"
+                        and attachment_synced < self._config.attachment_backfill_limit
                     ):
+                        attachment_synced += 1
                         try:
                             self._attachments.sync_for_video(pan_path, local_path, entry)
                         except Exception as err:  # noqa: BLE001

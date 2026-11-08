@@ -62,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.7"
+    plugin_version = "0.10.9"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -102,6 +102,8 @@ class CloudStrmKit(_PluginBase):
         :param config: 插件配置字典
         """
         self._config = self._parse_config(config)
+        self._backfilling = False
+        self._last_backfill: Optional[Dict[str, Any]] = None
         data_dir = self.get_data_path()
         self._index = StrmIndex(data_dir)
         self._diag = DiagEventLog(data_dir)
@@ -253,6 +255,12 @@ class CloudStrmKit(_PluginBase):
                 (self._config.scan_cron or "").strip(),
                 self._run_scan_job,
             ),
+            (
+                "CloudStrmKitBackfill",
+                "附件补全",
+                (self._config.attachment_backfill_cron or "").strip(),
+                self._run_backfill_job,
+            ),
         ):
             if not cron:
                 continue
@@ -290,6 +298,18 @@ class CloudStrmKit(_PluginBase):
             target=self._reconciler.run,
             kwargs={"mode": "scan"},
             name="CloudStrmKitScan",
+            daemon=True,
+        ).start()
+
+    def _run_backfill_job(self) -> None:
+        """定时附件补全入口。"""
+        if self._attachments is None or not self._config.enabled or self._backfilling:
+            return
+        self._backfilling = True
+        threading.Thread(
+            target=self._run_backfill,
+            args=(self._config.attachment_backfill_limit,),
+            name="CloudStrmKitBackfill",
             daemon=True,
         ).start()
 
@@ -438,6 +458,14 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "取消删除",
                 "description": "清空待确认删除列表，不删除任何文件",
+            },
+            {
+                "path": "/attachments/backfill",
+                "endpoint": self.api_attachments_backfill,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "附件补全",
+                "description": "分批补全本地缺失的附属文件（limit 控制单次条目数）",
             },
             {
                 "path": "/attachments/orphans",
@@ -925,6 +953,56 @@ class CloudStrmKit(_PluginBase):
         count = self._reconciler.cancel_pending()
         return {"success": True, "message": "", "data": {"cleared": count}}
 
+    def api_attachments_backfill(self, limit: int = 50) -> Dict[str, Any]:
+        """
+        手动触发附件补全（后台分批执行）。
+
+        :param limit: 单次最多处理的条目数
+        :return: 统一响应结构
+        """
+        if self._attachments is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        if self._backfilling:
+            return {
+                "success": False,
+                "message": "附件补全正在进行中",
+                "data": self._last_backfill,
+            }
+        limit = max(1, min(500, int(limit or 50)))
+        self._backfilling = True
+        threading.Thread(
+            target=self._run_backfill,
+            args=(limit,),
+            name="CloudStrmKitBackfill",
+            daemon=True,
+        ).start()
+        return {
+            "success": True,
+            "message": f"附件补全已开始（limit={limit}）",
+            "data": {"limit": limit},
+        }
+
+    def _run_backfill(self, limit: int) -> None:
+        """
+        执行附件补全并记录结果。
+
+        :param limit: 单次最多处理的条目数
+        """
+        try:
+            result = self._attachments.backfill(limit=limit, interval=0.5)
+            self._last_backfill = {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                **result,
+            }
+        except Exception as err:  # noqa: BLE001
+            logger.error(f"【CloudStrmKit】附件补全异常：{err}")
+            self._last_backfill = {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "error": str(err),
+            }
+        finally:
+            self._backfilling = False
+
     def api_scan_orphans(self) -> Dict[str, Any]:
         """
         扫描本地 STRM 目录下的孤儿附属文件（只读）。
@@ -1389,6 +1467,34 @@ class CloudStrmKit(_PluginBase):
                                             "model": "attachment_max_mb",
                                             "label": "附属文件大小上限(MB)",
                                             "type": "number",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "attachment_backfill_limit",
+                                            "label": "附件补全单次条目数",
+                                            "type": "number",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "attachment_backfill_cron",
+                                            "label": "附件补全定时 Cron（留空关闭）",
+                                            "placeholder": "0 4 * * 1",
                                         },
                                     }
                                 ],

@@ -61,6 +61,12 @@ class CloudStrmKitConfig(BaseModel):
     copy_exts: str = Field(default=DEFAULT_COPY_EXTS, description="附属文件扩展名白名单")
     attachment_max_mb: int = Field(default=10, ge=1, description="附属文件大小上限（MB）")
     attachment_conflict: str = Field(default="skip", description="附属文件冲突策略")
+    attachment_backfill_limit: int = Field(
+        default=50, ge=1, description="附件补全单次处理条目数"
+    )
+    attachment_backfill_cron: str = Field(
+        default="", description="附件补全定时 Cron（留空关闭）"
+    )
 
     # 对账与同步
     reconcile_cron: str = Field(default="30 4 * * *", description="对账 Cron 表达式")
