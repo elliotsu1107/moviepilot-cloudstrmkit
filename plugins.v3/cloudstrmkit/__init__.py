@@ -17,6 +17,7 @@ from app.schemas.types import EventType, MediaType
 from app.sdk.events import eventmanager
 from app.sdk.logging import logger
 from app.sdk.plugin import _PluginBase
+from apscheduler.triggers.cron import CronTrigger
 from fastapi import Request
 from fastapi.responses import Response
 
@@ -61,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.3"
+    plugin_version = "0.10.4"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -217,26 +218,39 @@ class CloudStrmKit(_PluginBase):
         """
         注册定时服务：日常对账 + 可选定期一致性扫描。
 
+        v3 的调度器要求 trigger 为触发器对象（CronTrigger），字符串会按
+        APScheduler 别名查找导致 "No trigger by the name" 注册失败。
+
         :return: 服务声明列表
         """
         services: List[Dict[str, Any]] = []
-        if (self._config.reconcile_cron or "").strip():
+        for sid, name, cron, func in (
+            (
+                "CloudStrmKitReconcile",
+                "STRM 对账",
+                (self._config.reconcile_cron or "").strip(),
+                self._run_reconcile_job,
+            ),
+            (
+                "CloudStrmKitScan",
+                "STRM 一致性扫描",
+                (self._config.scan_cron or "").strip(),
+                self._run_scan_job,
+            ),
+        ):
+            if not cron:
+                continue
+            try:
+                trigger = CronTrigger.from_crontab(cron)
+            except Exception as err:  # noqa: BLE001 - 非法表达式跳过并告警
+                logger.warning(f"【CloudStrmKit】{name} Cron 表达式无效，已跳过：{cron}（{err}）")
+                continue
             services.append(
                 {
-                    "id": "CloudStrmKitReconcile",
-                    "name": "STRM 对账",
-                    "trigger": self._config.reconcile_cron.strip(),
-                    "func": self._run_reconcile_job,
-                    "kwargs": {},
-                }
-            )
-        if (self._config.scan_cron or "").strip():
-            services.append(
-                {
-                    "id": "CloudStrmKitScan",
-                    "name": "STRM 一致性扫描",
-                    "trigger": self._config.scan_cron.strip(),
-                    "func": self._run_scan_job,
+                    "id": sid,
+                    "name": name,
+                    "trigger": trigger,
+                    "func": func,
                     "kwargs": {},
                 }
             )
