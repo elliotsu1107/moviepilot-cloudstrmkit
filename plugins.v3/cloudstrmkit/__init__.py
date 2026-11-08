@@ -62,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.12"
+    plugin_version = "0.10.13"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -302,16 +302,16 @@ class CloudStrmKit(_PluginBase):
         ).start()
 
     def _run_backfill_job(self) -> None:
-        """定时附件补全入口。"""
-        if self._attachments is None or not self._config.enabled or self._backfilling:
+        """定时附件补全入口（同步执行，调度线程内完成）。"""
+        if self._attachments is None or not self._config.enabled:
             return
-        self._backfilling = True
-        threading.Thread(
-            target=self._run_backfill,
-            args=(self._config.attachment_backfill_limit,),
-            name="CloudStrmKitBackfill",
-            daemon=True,
-        ).start()
+        try:
+            result = self._attachments.backfill(
+                limit=self._config.attachment_backfill_limit, interval=0.2
+            )
+            self._last_backfill = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), **result}
+        except Exception as err:  # noqa: BLE001
+            logger.error(f"【CloudStrmKit】定时附件补全失败：{err}")
 
     # ------------------------------------------------------------------
     # API
@@ -1012,55 +1012,24 @@ class CloudStrmKit(_PluginBase):
             "data": {"old": old_prefix, "new": new_prefix, "changed": changed},
         }
 
-    def api_attachments_backfill(self, limit: int = 50) -> Dict[str, Any]:
+    def api_attachments_backfill(self, limit: int = 20) -> Dict[str, Any]:
         """
-        手动触发附件补全（后台分批执行）。
+        附件补全（同步执行，小批量；批量大请用定时任务）。
 
         :param limit: 单次最多处理的条目数
         :return: 统一响应结构
         """
         if self._attachments is None:
             return {"success": False, "message": "插件未初始化", "data": None}
-        if self._backfilling:
-            return {
-                "success": False,
-                "message": "附件补全正在进行中",
-                "data": self._last_backfill,
-            }
-        limit = max(1, min(500, int(limit or 50)))
-        self._backfilling = True
-        threading.Thread(
-            target=self._run_backfill,
-            args=(limit,),
-            name="CloudStrmKitBackfill",
-            daemon=True,
-        ).start()
-        return {
-            "success": True,
-            "message": f"附件补全已开始（limit={limit}）",
-            "data": {"limit": limit},
-        }
-
-    def _run_backfill(self, limit: int) -> None:
-        """
-        执行附件补全并记录结果。
-
-        :param limit: 单次最多处理的条目数
-        """
+        limit = max(1, min(200, int(limit or 20)))
+        logger.info(f"【CloudStrmKit】附件补全（同步）：limit={limit}")
         try:
-            result = self._attachments.backfill(limit=limit, interval=0.5)
-            self._last_backfill = {
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                **result,
-            }
+            result = self._attachments.backfill(limit=limit, interval=0.2)
         except Exception as err:  # noqa: BLE001
             logger.error(f"【CloudStrmKit】附件补全异常：{err}")
-            self._last_backfill = {
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "error": str(err),
-            }
-        finally:
-            self._backfilling = False
+            return {"success": False, "message": f"附件补全失败：{err}", "data": None}
+        self._last_backfill = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), **result}
+        return {"success": True, "message": "", "data": result}
 
     def api_scan_orphans(self) -> Dict[str, Any]:
         """
