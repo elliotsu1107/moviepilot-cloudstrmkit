@@ -62,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.13"
+    plugin_version = "0.10.14"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -346,6 +346,14 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "整理事件记录",
                 "description": "返回最近记录的 TransferComplete 事件载荷（T3 验证用）",
+            },
+            {
+                "path": "/diag/backfill-pickcode",
+                "endpoint": self.api_backfill_pickcode,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "回填缺失 pickcode",
+                "description": "遍历索引中缺少 pickcode 的条目，按路径向 115 查询并回填",
             },
             {
                 "path": "/diag/migrate-path",
@@ -961,6 +969,32 @@ class CloudStrmKit(_PluginBase):
         count = self._reconciler.cancel_pending()
         return {"success": True, "message": "", "data": {"cleared": count}}
 
+    def api_backfill_pickcode(self) -> Dict[str, Any]:
+        """
+        回填索引中缺失的 pickcode（逐条按 115 路径查询）。
+
+        :return: 统一响应结构
+        """
+        if self._index is None or self._u115 is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        missing = [item for item in self._index.all_items() if not (item.pickcode or "").strip()]
+        filled = 0
+        failed = 0
+        for entry in missing:
+            try:
+                entry.pickcode = self._u115.get_pickcode(entry.pan_path)
+                self._index.upsert(entry)
+                filled += 1
+            except Exception as err:  # noqa: BLE001
+                failed += 1
+                logger.warning(f"【CloudStrmKit】pickcode 回填失败：{entry.pan_path}：{err}")
+        logger.info(f"【CloudStrmKit】pickcode 回填：缺失 {len(missing)}，成功 {filled}，失败 {failed}")
+        return {
+            "success": True,
+            "message": f"回填完成：成功 {filled}，失败 {failed}",
+            "data": {"missing": len(missing), "filled": filled, "failed": failed},
+        }
+
     def api_migrate_path(self, old: str = "", new: str = "") -> Dict[str, Any]:
         """
         迁移索引中的 STRM 路径前缀（如 /strm_test → /strm）。
@@ -1249,475 +1283,542 @@ class CloudStrmKit(_PluginBase):
                 "component": "VForm",
                 "content": [
                     {
-                        "component": "VRow",
+                        "component": "VExpansionPanels",
+                        "props": {"variant": "accordion", "class": "mt-2"},
                         "content": [
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 12},
+                                "component": "VExpansionPanel",
+                                "props": {"title": "概述"},
                                 "content": [
                                     {
-                                        "component": "VAlert",
-                                        "props": {
-                                            "type": "info",
-                                            "variant": "tonal",
-                                            "text": "整理完成后自动生成 STRM 并刷新飞牛媒体库；"
-                                            "播放时本插件用请求方 UA 换取 115 直链并 302。"
-                                            "请先配置 115 存储名称、飞牛实例、基础地址与路径映射。",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    # 基础设置
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "enabled", "label": "启用插件"},
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    select_or_text(
-                                        "source_storage",
-                                        "115 存储名称",
-                                        storage_options,
-                                        "115网盘",
-                                    )
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    select_or_text(
-                                        "fnos_instance",
-                                        "飞牛媒体服务器实例名",
-                                        fnos_options,
-                                        "如 MyFnos",
-                                    )
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "base_url",
-                                            "label": "对外基础地址",
-                                            "placeholder": "https://mp.example.com",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    # STRM 路径
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "strm_root_local",
-                                            "label": "容器内 STRM 根目录",
-                                            "placeholder": "/strm_test",
-                                        },
+                                        "component": "VExpansionPanelText",
+                                        "content": [
+                                            {
+                                                "component": "VRow",
+                                                "content": [
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 12},
+                                                        "content": [
+                                                            {
+                                                                "component": "VAlert",
+                                                                "props": {
+                                                                    "type": "info",
+                                                                    "variant": "tonal",
+                                                                    "text": "整理完成后自动生成 STRM 并刷新飞牛媒体库；"
+                                                                    "播放时本插件用请求方 UA 换取 115 直链并 302。"
+                                                                    "请先配置 115 存储名称、飞牛实例、基础地址与路径映射。",
+                                                                },
+                                                            }
+                                                        ],
+                                                    }
+                                                ],
+                                            },
+                                        ],
                                     }
                                 ],
                             },
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "component": "VExpansionPanel",
+                                "props": {"title": "基础设置"},
                                 "content": [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "strm_root_fnos",
-                                            "label": "飞牛视角 STRM 根目录",
-                                            "placeholder": "/path/to/strm",
-                                        },
+                                        "component": "VExpansionPanelText",
+                                        "content": [
+                                            {
+                                                "component": "VRow",
+                                                "content": [
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VSwitch",
+                                                                "props": {"model": "enabled", "label": "启用插件"},
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            select_or_text(
+                                                                "source_storage",
+                                                                "115 存储名称",
+                                                                storage_options,
+                                                                "115网盘",
+                                                            )
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            select_or_text(
+                                                                "fnos_instance",
+                                                                "飞牛媒体服务器实例名",
+                                                                fnos_options,
+                                                                "如 MyFnos",
+                                                            )
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "base_url",
+                                                                    "label": "对外基础地址",
+                                                                    "placeholder": "https://mp.example.com",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                        ],
                                     }
                                 ],
                             },
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "component": "VExpansionPanel",
+                                "props": {"title": "STRM 路径"},
                                 "content": [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "video_exts",
-                                            "label": "视频扩展名",
-                                            "placeholder": "mkv,mp4,ts",
-                                        },
+                                        "component": "VExpansionPanelText",
+                                        "content": [
+                                            {
+                                                "component": "VRow",
+                                                "content": [
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "strm_root_local",
+                                                                    "label": "容器内 STRM 根目录",
+                                                                    "placeholder": "/strm_test",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "strm_root_fnos",
+                                                                    "label": "飞牛视角 STRM 根目录",
+                                                                    "placeholder": "/path/to/strm",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "video_exts",
+                                                                    "label": "视频扩展名",
+                                                                    "placeholder": "mkv,mp4,ts",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "min_size_mb",
+                                                                    "label": "最小文件大小(MB)",
+                                                                    "type": "number",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                            {
+                                                "component": "VRow",
+                                                "content": [
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextarea",
+                                                                "props": {
+                                                                    "model": "path_mappings",
+                                                                    "label": "路径映射（每行：115前缀 => 容器内根目录）",
+                                                                    "rows": 4,
+                                                                    "placeholder": "/movie => /strm_test/movie\n/tv => /strm_test/tv",
+                                                                },
+                                                            }
+                                                        ],
+                                                    }
+                                                ],
+                                            },
+                                        ],
                                     }
                                 ],
                             },
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "component": "VExpansionPanel",
+                                "props": {"title": "302 与安全"},
                                 "content": [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "min_size_mb",
-                                            "label": "最小文件大小(MB)",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "path_mappings",
-                                            "label": "路径映射（每行：115前缀 => 容器内根目录）",
-                                            "rows": 4,
-                                            "placeholder": "/movie => /strm_test/movie\n/tv => /strm_test/tv",
-                                        },
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                    # 302 与安全
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cache_ttl",
-                                            "label": "直链缓存(秒)",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "qps",
-                                            "label": "换链限频(QPS)",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "cooldown_seconds",
-                                            "label": "风控冷却(秒)",
-                                            "type": "number",
-                                        },
+                                        "component": "VExpansionPanelText",
+                                        "content": [
+                                            {
+                                                "component": "VRow",
+                                                "content": [
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "cache_ttl",
+                                                                    "label": "直链缓存(秒)",
+                                                                    "type": "number",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "qps",
+                                                                    "label": "换链限频(QPS)",
+                                                                    "type": "number",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "cooldown_seconds",
+                                                                    "label": "风控冷却(秒)",
+                                                                    "type": "number",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 3},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "secret",
+                                                                    "label": "STRM 签名密钥",
+                                                                    "placeholder": "留空自动生成",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                        ],
                                     }
                                 ],
                             },
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 3},
+                                "component": "VExpansionPanel",
+                                "props": {"title": "附属文件"},
                                 "content": [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "secret",
-                                            "label": "STRM 签名密钥",
-                                            "placeholder": "留空自动生成",
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    # 附属文件
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "copy_exts",
-                                            "label": "附属文件扩展名",
-                                            "placeholder": "nfo,jpg,png,srt",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "attachment_max_mb",
-                                            "label": "附属文件大小上限(MB)",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "attachment_backfill_limit",
-                                            "label": "附件补全单次条目数",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "attachment_backfill_cron",
-                                            "label": "附件补全定时 Cron（留空关闭）",
-                                            "placeholder": "0 4 * * 1",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "attachment_conflict",
-                                            "label": "附属文件冲突策略",
-                                            "items": [
-                                                {"title": "跳过已有文件", "value": "skip"},
-                                                {"title": "覆盖已有文件", "value": "overwrite"},
-                                            ],
-                                        },
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    # 对账
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "reconcile_cron",
-                                            "label": "日常对账 Cron",
-                                            "placeholder": "30 4 * * *",
-                                        },
+                                        "component": "VExpansionPanelText",
+                                        "content": [
+                                            {
+                                                "component": "VRow",
+                                                "content": [
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "copy_exts",
+                                                                    "label": "附属文件扩展名",
+                                                                    "placeholder": "nfo,jpg,png,srt",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "attachment_max_mb",
+                                                                    "label": "附属文件大小上限(MB)",
+                                                                    "type": "number",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "attachment_backfill_limit",
+                                                                    "label": "附件补全单次条目数",
+                                                                    "type": "number",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "attachment_backfill_cron",
+                                                                    "label": "附件补全定时 Cron（留空关闭）",
+                                                                    "placeholder": "0 4 * * 1",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VSelect",
+                                                                "props": {
+                                                                    "model": "attachment_conflict",
+                                                                    "label": "附属文件冲突策略",
+                                                                    "items": [
+                                                                        {"title": "跳过已有文件", "value": "skip"},
+                                                                        {"title": "覆盖已有文件", "value": "overwrite"},
+                                                                    ],
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                        ],
                                     }
                                 ],
                             },
                             {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "component": "VExpansionPanel",
+                                "props": {"title": "对账"},
                                 "content": [
                                     {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "scan_cron",
-                                            "label": "定期一致性扫描 Cron（scan，留空关闭）",
-                                            "placeholder": "30 3 * * 0（每周日）",
-                                        },
+                                        "component": "VExpansionPanelText",
+                                        "content": [
+                                            {
+                                                "component": "VRow",
+                                                "content": [
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "reconcile_cron",
+                                                                    "label": "日常对账 Cron",
+                                                                    "placeholder": "30 4 * * *",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "scan_cron",
+                                                                    "label": "定期一致性扫描 Cron（scan，留空关闭）",
+                                                                    "placeholder": "30 3 * * 0（每周日）",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VSelect",
+                                                                "props": {
+                                                                    "model": "reconcile_mode",
+                                                                    "label": "对账模式",
+                                                                    "items": [
+                                                                        {"title": "整理历史（快）", "value": "history"},
+                                                                        {"title": "扫描 115 全库（慢）", "value": "scan"},
+                                                                    ],
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VSwitch",
+                                                                "props": {
+                                                                    "model": "delete_sync",
+                                                                    "label": "115 删除后同步删除本地文件",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VSwitch",
+                                                                "props": {
+                                                                    "model": "delete_sync_verify",
+                                                                    "label": "删除前逐条确认 115 不存在（防误删）",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "delete_sync_batch_limit",
+                                                                    "label": "单次自动删除上限（条）",
+                                                                    "type": "number",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextField",
+                                                                "props": {
+                                                                    "model": "delete_sync_max_ratio",
+                                                                    "label": "删除占索引比例上限（0-1）",
+                                                                    "type": "number",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VSwitch",
+                                                                "props": {
+                                                                    "model": "notify_enabled",
+                                                                    "label": "启用通知（对账完成/播放失败）",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VSwitch",
+                                                                "props": {
+                                                                    "model": "reconcile_sync_attachments",
+                                                                    "label": "对账时同步附属文件（首次全量建议关闭）",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VSwitch",
+                                                                "props": {
+                                                                    "model": "run_once",
+                                                                    "label": "立即执行一次一致性扫描（保存后触发）",
+                                                                },
+                                                            }
+                                                        ],
+                                                    },
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12, "md": 4},
+                                                        "content": [
+                                                            {
+                                                                "component": "VSwitch",
+                                                                "props": {"model": "debug", "label": "调试日志"},
+                                                            }
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                            {
+                                                "component": "VRow",
+                                                "content": [
+                                                    {
+                                                        "component": "VCol",
+                                                        "props": {"cols": 12},
+                                                        "content": [
+                                                            {
+                                                                "component": "VTextarea",
+                                                                "props": {
+                                                                    "model": "library_roots",
+                                                                    "label": "对账用 115 媒体库根路径（每行一个）",
+                                                                    "rows": 3,
+                                                                    "placeholder": "/movie/电影\n/tv/电视剧",
+                                                                },
+                                                            }
+                                                        ],
+                                                    }
+                                                ],
+                                            },
+                                        ],
                                     }
                                 ],
                             },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "reconcile_mode",
-                                            "label": "对账模式",
-                                            "items": [
-                                                {"title": "整理历史（快）", "value": "history"},
-                                                {"title": "扫描 115 全库（慢）", "value": "scan"},
-                                            ],
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "delete_sync",
-                                            "label": "115 删除后同步删除本地文件",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "delete_sync_verify",
-                                            "label": "删除前逐条确认 115 不存在（防误删）",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "delete_sync_batch_limit",
-                                            "label": "单次自动删除上限（条）",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VTextField",
-                                        "props": {
-                                            "model": "delete_sync_max_ratio",
-                                            "label": "删除占索引比例上限（0-1）",
-                                            "type": "number",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "notify_enabled",
-                                            "label": "启用通知（对账完成/播放失败）",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "reconcile_sync_attachments",
-                                            "label": "对账时同步附属文件（首次全量建议关闭）",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {
-                                            "model": "run_once",
-                                            "label": "立即执行一次一致性扫描（保存后触发）",
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSwitch",
-                                        "props": {"model": "debug", "label": "调试日志"},
-                                    }
-                                ],
-                            },
-                        ],
-                    },
-                    {
-                        "component": "VRow",
-                        "content": [
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12},
-                                "content": [
-                                    {
-                                        "component": "VTextarea",
-                                        "props": {
-                                            "model": "library_roots",
-                                            "label": "对账用 115 媒体库根路径（每行一个）",
-                                            "rows": 3,
-                                            "placeholder": "/movie/电影\n/tv/电视剧",
-                                        },
-                                    }
-                                ],
-                            }
                         ],
                     },
                 ],
