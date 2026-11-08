@@ -62,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.15"
+    plugin_version = "0.10.17"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -450,6 +450,14 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "对账状态",
                 "description": "返回对账运行状态与最近一次结果",
+            },
+            {
+                "path": "/reconcile/history",
+                "endpoint": self.api_reconcile_history,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "对账历史",
+                "description": "最近 10 次对账结果（含补漏/清理/刷新明细）",
             },
             {
                 "path": "/delete/pending",
@@ -931,6 +939,18 @@ class CloudStrmKit(_PluginBase):
                 "pending_deletions": len(self._reconciler.list_pending()),
             },
         }
+
+    def api_reconcile_history(self, limit: int = 20) -> Dict[str, Any]:
+        """
+        返回最近对账历史。
+
+        :param limit: 最多返回条数
+        :return: 统一响应结构
+        """
+        if self._reconciler is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        items = self._reconciler.load_history(limit=max(1, min(20, int(limit or 20))))
+        return {"success": True, "message": "", "data": {"items": items, "count": len(items)}}
 
     def api_delete_pending(self) -> Dict[str, Any]:
         """
@@ -1969,7 +1989,7 @@ class CloudStrmKit(_PluginBase):
                 },
             ]
 
-        play_items = self._play.recent_logs(10) if self._play is not None else []
+        play_items = self._play.recent_logs(20) if self._play is not None else []
         play_nodes: List[dict] = []
         for item in play_items:
             status = item.get("status")
@@ -2003,7 +2023,7 @@ class CloudStrmKit(_PluginBase):
         if self._index is not None:
             recent_items = sorted(
                 self._index.all_items(), key=lambda item: item.created_at, reverse=True
-            )[:8]
+            )[:20]
         recent_nodes: List[dict] = [
             {
                 "component": "VListItem",
@@ -2045,19 +2065,16 @@ class CloudStrmKit(_PluginBase):
             {
                 "component": "VRow",
                 "content": [
+                    panel("对账状态", "mdi-sync-circle", kv_rows(reconcile_rows)),
                     panel(
-                        "对账状态",
-                        "mdi-sync-circle",
-                        kv_rows(reconcile_rows) + detail_nodes,
-                    ),
-                    panel(
-                        "示例 STRM 内容",
-                        "mdi-link-variant",
-                        [
+                        "最近对账明细",
+                        "mdi-clipboard-text-outline",
+                        detail_nodes
+                        or [
                             {
                                 "component": "div",
-                                "props": {"class": "text-body-2 text-break"},
-                                "text": sample_text,
+                                "props": {"class": "text-caption"},
+                                "text": "暂无对账记录",
                             }
                         ],
                     ),
@@ -2072,7 +2089,7 @@ class CloudStrmKit(_PluginBase):
                         [
                             {
                                 "component": "VList",
-                                "props": {"density": "compact"},
+                                "props": {"density": "compact", "max-height": "360px", "class": "overflow-y-auto"},
                                 "content": play_nodes,
                             }
                         ],
@@ -2083,7 +2100,7 @@ class CloudStrmKit(_PluginBase):
                         [
                             {
                                 "component": "VList",
-                                "props": {"density": "compact"},
+                                "props": {"density": "compact", "max-height": "360px", "class": "overflow-y-auto"},
                                 "content": recent_nodes,
                             }
                         ],

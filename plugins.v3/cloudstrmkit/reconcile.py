@@ -701,18 +701,49 @@ class Reconciler:
 
     def _save_last_run(self, result: Dict[str, Any]) -> None:
         """
-        持久化最近一次对账结果（含明细，重启后可查）。
+        持久化最近一次对账结果（含明细），并滚动保留最近 10 次历史。
 
         :param result: 对账结果
         """
         try:
-            path = self._pending_path.parent / "last_reconcile.json"
-            path.write_text(
-                json.dumps(result, ensure_ascii=False, indent=1),
+            base = self._pending_path.parent
+            payload = dict(result)
+            payload["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            (base / "last_reconcile.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+            history_path = base / "reconcile_history.json"
+            items: List[Dict[str, Any]] = []
+            if history_path.exists():
+                try:
+                    items = json.loads(history_path.read_text(encoding="utf-8")).get("items") or []
+                except Exception:  # noqa: BLE001 - 损坏时重建
+                    items = []
+            items.insert(0, payload)
+            history_path.write_text(
+                json.dumps({"items": items[:20]}, ensure_ascii=False, indent=1),
                 encoding="utf-8",
             )
         except Exception as err:  # noqa: BLE001
             logger.debug(f"【CloudStrmKit】保存对账结果失败：{err}")
+
+    def load_history(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """
+        读取最近对账历史。
+
+        :param limit: 最多返回条数
+        :return: 对账结果列表（新到旧）
+        """
+        try:
+            path = self._pending_path.parent / "reconcile_history.json"
+            if path.exists():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                items = payload.get("items") or []
+                return [item for item in items if isinstance(item, dict)][: max(1, min(20, limit))]
+        except Exception:  # noqa: BLE001
+            pass
+        return []
 
     @staticmethod
     def _stop_if_needed() -> bool:
