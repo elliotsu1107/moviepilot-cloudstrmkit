@@ -62,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.9"
+    plugin_version = "0.10.12"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -346,6 +346,14 @@ class CloudStrmKit(_PluginBase):
                 "auth": "bear",
                 "summary": "整理事件记录",
                 "description": "返回最近记录的 TransferComplete 事件载荷（T3 验证用）",
+            },
+            {
+                "path": "/diag/migrate-path",
+                "endpoint": self.api_migrate_path,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "迁移索引路径前缀",
+                "description": "把索引中的 STRM 路径前缀从旧值迁移到新值（如 /strm_test → /strm），迁移后执行 /rebuild",
             },
             {
                 "path": "/diag/u115",
@@ -952,6 +960,57 @@ class CloudStrmKit(_PluginBase):
             return {"success": False, "message": "插件未初始化", "data": None}
         count = self._reconciler.cancel_pending()
         return {"success": True, "message": "", "data": {"cleared": count}}
+
+    def api_migrate_path(self, old: str = "", new: str = "") -> Dict[str, Any]:
+        """
+        迁移索引中的 STRM 路径前缀（如 /strm_test → /strm）。
+
+        :param old: 旧前缀（缺省 /strm_test）
+        :param new: 新前缀（缺省使用配置的 strm_root_local）
+        :return: 统一响应结构
+        """
+        if self._index is None:
+            return {"success": False, "message": "插件未初始化", "data": None}
+        old_prefix = (old or "/strm_test").rstrip("/")
+        new_prefix = (new or self._config.strm_root_local or "/strm").rstrip("/")
+        if not old_prefix or not new_prefix or old_prefix == new_prefix:
+            return {"success": False, "message": "参数无效", "data": None}
+        changed = 0
+        entries = []
+        for entry in self._index.all_items():
+            updated = False
+            if entry.strm_path.startswith(old_prefix + "/"):
+                entry.strm_path = new_prefix + entry.strm_path[len(old_prefix):]
+                updated = True
+            for att in entry.attachments or []:
+                if att.local_path.startswith(old_prefix + "/"):
+                    att.local_path = new_prefix + att.local_path[len(old_prefix):]
+                    updated = True
+            if updated:
+                changed += 1
+            entries.append(entry)
+        if changed:
+            self._index.add_many(entries)
+        # 目录级附件路径同步迁移
+        dir_map = getattr(self._index, "_dir_attachments", None)
+        att_changed = 0
+        if isinstance(dir_map, dict):
+            for att_items in dir_map.values():
+                for att in att_items or []:
+                    if att.local_path.startswith(old_prefix + "/"):
+                        att.local_path = new_prefix + att.local_path[len(old_prefix):]
+                        att_changed += 1
+            if att_changed:
+                self._index.save()
+        logger.info(
+            f"【CloudStrmKit】索引路径迁移：{old_prefix} → {new_prefix}，"
+            f"条目 {changed}，目录附件 {att_changed}"
+        )
+        return {
+            "success": True,
+            "message": f"已迁移 {changed} 条",
+            "data": {"old": old_prefix, "new": new_prefix, "changed": changed},
+        }
 
     def api_attachments_backfill(self, limit: int = 50) -> Dict[str, Any]:
         """

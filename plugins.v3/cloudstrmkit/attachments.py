@@ -258,6 +258,7 @@ class AttachmentSyncer:
         :param interval: 每处理一个条目的间隔秒数（节流，防 115 风控）
         :return: 统计结果
         """
+        logger.info(f"【CloudStrmKit】附件补全开始：limit={limit}，索引条目={len(self._index)}")
         processed = 0
         synced_videos = 0
         synced_files = 0
@@ -286,6 +287,11 @@ class AttachmentSyncer:
             except Exception as err:  # noqa: BLE001
                 failed += 1
                 logger.warning(f"【CloudStrmKit】附件补全失败：{entry.pan_path}：{err}")
+            if processed % 10 == 0:
+                logger.info(
+                    f"【CloudStrmKit】附件补全进度：处理 {processed}，"
+                    f"同步视频 {synced_videos}，文件 {synced_files}，跳过 {skipped}"
+                )
             if interval > 0:
                 time.sleep(interval)
         logger.info(
