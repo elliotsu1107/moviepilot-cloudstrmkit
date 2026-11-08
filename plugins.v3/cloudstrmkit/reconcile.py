@@ -319,6 +319,10 @@ class Reconciler:
         items = self._list_dir(pan_dir)
         if items is None:
             return False
+        # 扫描节流：降低目录列举频率，避免触发 115 访问上限
+        interval = float(getattr(self, "_scan_interval", 0) or 0)
+        if interval > 0:
+            time.sleep(interval)
         ok = True
         for item in items:
             item_type = self._item_type(item)
@@ -358,6 +362,10 @@ class Reconciler:
             ok = self._walk(Path(root), videos)
             root_status.append({"root": root, "ok": ok, "found": len(videos) - before})
             scan_ok = scan_ok or ok
+            if not ok:
+                # 目录列举失败（含风控/异常）：中止后续根目录，避免放大请求
+                logger.warning("【CloudStrmKit】目录扫描失败，中止剩余根目录")
+                break
         logger.info(
             f"【CloudStrmKit】目录扫描：{len(videos)} 个视频，根目录状态={root_status}"
         )
@@ -471,6 +479,7 @@ class Reconciler:
         effective_mode = (mode or self._config.reconcile_mode or "history").strip().lower()
         if effective_mode not in {"history", "scan"}:
             effective_mode = "history"
+        self._scan_interval = 0.5 if effective_mode == "scan" else 0.0
         scope = [
             item.strip().replace("\\", "/").rstrip("/")
             for item in (paths or [])
@@ -560,7 +569,11 @@ class Reconciler:
                     new_entries.append(entry)
                     result["generated"] += 1
                     refresh_dirs.append(strm_path.parent)
-                    if self._attachments is not None and self._config.reconcile_sync_attachments:
+                    if (
+                        self._attachments is not None
+                        and self._config.reconcile_sync_attachments
+                        and effective_mode != "scan"
+                    ):
                         try:
                             self._attachments.sync_for_video(pan_path, local_path, entry)
                         except Exception as err:  # noqa: BLE001

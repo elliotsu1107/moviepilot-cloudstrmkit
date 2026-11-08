@@ -62,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.6"
+    plugin_version = "0.10.7"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
