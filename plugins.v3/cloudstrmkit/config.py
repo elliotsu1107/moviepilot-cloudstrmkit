@@ -71,6 +71,9 @@ class CloudStrmKitConfig(BaseModel):
     scan_cron: str = Field(
         default="", description="定期一致性扫描 Cron（scan 模式，留空关闭）"
     )
+    run_once: bool = Field(
+        default=False, description="立即执行一次一致性扫描（保存配置后触发并自动复位）"
+    )
     reconcile_sync_attachments: bool = Field(
         default=False, description="对账时同步附属文件（首次全量建议关闭）"
     )

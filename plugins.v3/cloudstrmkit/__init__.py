@@ -62,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.4"
+    plugin_version = "0.10.6"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -146,6 +146,22 @@ class CloudStrmKit(_PluginBase):
             f"索引条目={len(self._index)}，映射={len(self._mapper.mappings)} 条，"
             f"飞牛实例={self._config.fnos_instance or '未配置'}，数据目录={data_dir}"
         )
+
+        # 「立即扫描一次」：保存配置后插件重载时触发一次 scan，并自动复位开关
+        if getattr(self._config, "run_once", False) and self._reconciler is not None:
+            self._config.run_once = False
+            try:
+                self.update_config({**self._config.model_dump(), "run_once": False})
+            except Exception as err:  # noqa: BLE001
+                logger.warning(f"【CloudStrmKit】复位 run_once 失败：{err}")
+            if not self._reconciler.running:
+                threading.Thread(
+                    target=self._reconciler.run,
+                    kwargs={"mode": "scan"},
+                    name="CloudStrmKitRunOnce",
+                    daemon=True,
+                ).start()
+                logger.info("【CloudStrmKit】已按「立即扫描一次」触发一致性扫描")
 
     def _ensure_secret(self, config: Optional[Dict[str, Any]]) -> str:
         """
@@ -820,11 +836,12 @@ class CloudStrmKit(_PluginBase):
     # ------------------------------------------------------------------
     # 对账
     # ------------------------------------------------------------------
-    def api_reconcile(self, paths: str = "") -> Dict[str, Any]:
+    def api_reconcile(self, paths: str = "", mode: str = "") -> Dict[str, Any]:
         """
         手动触发一次对账（后台执行）。
 
         :param paths: 可选，逗号分隔的 115 路径前缀（仅处理这些范围）
+        :param mode: 可选，history 或 scan（缺省用配置的模式）
         :return: 统一响应结构
         """
         if self._reconciler is None:
@@ -832,16 +849,23 @@ class CloudStrmKit(_PluginBase):
         if self._reconciler.running:
             return {"success": False, "message": "对账正在进行中", "data": None}
         scope = [item.strip() for item in (paths or "").split(",") if item.strip()]
+        effective_mode = (mode or "").strip().lower() or None
+        if effective_mode not in (None, "history", "scan"):
+            return {
+                "success": False,
+                "message": "mode 仅支持 history 或 scan",
+                "data": None,
+            }
         threading.Thread(
             target=self._reconciler.run,
-            args=(scope,),
+            kwargs={"paths": scope, "mode": effective_mode},
             name="CloudStrmKitReconcileManual",
             daemon=True,
         ).start()
         return {
             "success": True,
-            "message": "对账已开始（后台执行）",
-            "data": {"scope": scope},
+            "message": f"对账已开始（mode={effective_mode or self._config.reconcile_mode}）",
+            "data": {"scope": scope, "mode": effective_mode or self._config.reconcile_mode},
         }
 
     def api_reconcile_status(self) -> Dict[str, Any]:
@@ -1513,6 +1537,19 @@ class CloudStrmKit(_PluginBase):
                                         "props": {
                                             "model": "reconcile_sync_attachments",
                                             "label": "对账时同步附属文件（首次全量建议关闭）",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "run_once",
+                                            "label": "立即执行一次一致性扫描（保存后触发）",
                                         },
                                     }
                                 ],
