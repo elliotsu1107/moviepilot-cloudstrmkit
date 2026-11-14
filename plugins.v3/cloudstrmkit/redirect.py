@@ -116,20 +116,21 @@ class PlayService:
         headers = {
             "Location": url,
             "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
         }
         # 播放日志去重：同一片 24 小时内只记录一次（避免播放器频繁请求刷屏）
         dedupe_key = f"{entry.pan_path}|{client_ip}"
         now = time.time()
         should_record = False
         with self._log_lock:
+            # 无条件清理超过 24 小时的去重键，避免长期运行内存缓慢增长
+            expired = [key for key, ts in self._log_dedupe.items() if now - ts >= 86400]
+            for key in expired:
+                self._log_dedupe.pop(key, None)
             last = self._log_dedupe.get(dedupe_key)
             if last is None or now - last >= 86400:
                 self._log_dedupe[dedupe_key] = now
                 should_record = True
-                # 清理超过 24 小时的去重键，避免无限增长
-                expired = [key for key, ts in self._log_dedupe.items() if now - ts >= 86400]
-                for key in expired:
-                    self._log_dedupe.pop(key, None)
         if should_record:
             self._record(
                 {
@@ -184,12 +185,14 @@ class PlayService:
         :param retry_after: Retry-After 头
         :return: 响应
         """
+        entry = self._index.get(entry_id) if (entry_id and self._index) else None
         self._record(
             {
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "entry_id": entry_id,
                 "ip": client_ip,
                 "ua": (user_agent or "")[:120],
+                "pan_path": entry.pan_path if entry else "",
                 "status": status,
                 "message": message,
                 "elapsed_ms": round((time.monotonic() - started) * 1000, 1),

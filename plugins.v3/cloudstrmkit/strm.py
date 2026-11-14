@@ -186,7 +186,9 @@ class StrmContentBuilder:
         expires = expires_at or int(time.time()) + self._expire
         signature = self.sign(entry_id, expires)
         route = PLAY_ROUTE.format(plugin_id=self._plugin_id)
-        return f"{self._base_url}{route}?f={entry_id}&e={expires}&sig={signature}"
+        # 路径式 URL（无查询串）：与旧方案形态一致，避免媒体服务器
+        # 对带查询串的 STRM 判定为非直连而走服务端代理
+        return f"{self._base_url}{route}/{entry_id}/{expires}/{signature}"
 
 
 def write_strm(strm_path: Path, content: str) -> None:

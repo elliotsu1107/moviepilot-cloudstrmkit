@@ -62,7 +62,7 @@ class CloudStrmKit(_PluginBase):
         "refs/heads/v2/src/assets/images/misc/u115.png"
     )
     # 插件版本
-    plugin_version = "0.10.19"
+    plugin_version = "0.10.20"
     # 插件作者
     plugin_author = "elliotsu1107"
     # 作者主页
@@ -408,8 +408,16 @@ class CloudStrmKit(_PluginBase):
                 "endpoint": self.api_play,
                 "methods": ["GET", "HEAD"],
                 "allow_anonymous": True,
-                "summary": "302 播放",
+                "summary": "302 播放（查询串，兼容旧 STRM）",
                 "description": "校验签名后用请求方 UA 换取 115 直链并返回 302",
+            },
+            {
+                "path": "/play/{f}/{e}/{sig}",
+                "endpoint": self.api_play,
+                "methods": ["GET", "HEAD"],
+                "allow_anonymous": True,
+                "summary": "302 播放（路径式，无查询串）",
+                "description": "与查询串版本等价；URL 形态对齐旧方案，利于播放器直连",
             },
             {
                 "path": "/play/logs",
