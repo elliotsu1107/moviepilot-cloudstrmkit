@@ -111,9 +111,11 @@ class PlayService:
             return self._reject(502, f"115 换链失败：{err}", entry_id, user_agent, client_ip, started)
 
         filename = Path(entry.pan_path).name
+        # 与旧方案（Werkzeug）对齐：纯 302 + text/html，避免播放器/媒体服务器
+        # 因 Content-Disposition: attachment 判定为下载而走服务端中转
         headers = {
             "Location": url,
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
+            "Content-Type": "text/html; charset=utf-8",
         }
         # 播放日志去重：同一片 24 小时内只记录一次（避免播放器频繁请求刷屏）
         dedupe_key = f"{entry.pan_path}|{client_ip}"
