@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -52,6 +53,8 @@ class PlayService:
         self._debug = debug
         self._notifier = notifier
         self._logs: "deque[Dict[str, Any]]" = deque(maxlen=PLAY_LOG_LIMIT)
+        self._log_lock = threading.Lock()
+        self._log_dedupe: Dict[str, float] = {}
 
     def handle(self, request: Request, entry_id: str, expires_at: int, signature: str) -> Response:
         """
@@ -112,18 +115,32 @@ class PlayService:
             "Location": url,
             "Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}",
         }
-        self._record(
-            {
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "entry_id": entry_id,
-                "ip": client_ip,
-                "ua": user_agent[:120],
-                "pan_path": entry.pan_path,
-                "status": 302,
-                "cached": self._u115.last_cached,
-                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
-            }
-        )
+        # 播放日志去重：同一片 24 小时内只记录一次（避免播放器频繁请求刷屏）
+        dedupe_key = f"{entry.pan_path}|{client_ip}"
+        now = time.time()
+        should_record = False
+        with self._log_lock:
+            last = self._log_dedupe.get(dedupe_key)
+            if last is None or now - last >= 86400:
+                self._log_dedupe[dedupe_key] = now
+                should_record = True
+                # 清理超过 24 小时的去重键，避免无限增长
+                expired = [key for key, ts in self._log_dedupe.items() if now - ts >= 86400]
+                for key in expired:
+                    self._log_dedupe.pop(key, None)
+        if should_record:
+            self._record(
+                {
+                    "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "entry_id": entry_id,
+                    "ip": client_ip,
+                    "ua": user_agent[:120],
+                    "pan_path": entry.pan_path,
+                    "status": 302,
+                    "cached": self._u115.last_cached,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                }
+            )
         if self._debug:
             logger.info(f"【CloudStrmKit】302：{filename} UA={user_agent[:60]}")
         return Response(status_code=302, headers=headers)
